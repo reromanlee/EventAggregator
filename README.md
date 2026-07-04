@@ -111,9 +111,11 @@ The implementation is pure C# against .NET Standard 2.1 (`ConcurrentDictionary`,
 
 **Tools ▸ Event Debugger** opens a live trace of every bus in the session: each publish shows who
 fired which event, followed by a row per listener that received it. Events published from inside a
-handler are indented one level deeper, so chain reactions read as a tree. A dropdown filters the
-view to a single bus — instances appear as "EventBus #1", "EventBus #2", … in creation order, or
-under a custom name:
+handler are indented one level deeper, so chain reactions read as a tree. Each root publish and
+everything it triggered are grouped into one block, newest at the bottom; the view follows new
+events automatically unless you scroll up to read history, and re-attaches when you scroll back
+down. A dropdown filters the view to a single bus — instances appear as "EventBus 1",
+"EventBus 2", … in creation order, or under a custom name:
 
 ```csharp
 var bus = new EventBus();
@@ -130,4 +132,4 @@ Handlers publishing further events is normal and supported. What is not survivab
 
 ## License
 
-[MIT](LICENSE) © Roman Likhadievski
+[MIT](LICENSE.md) © Roman Likhadievski

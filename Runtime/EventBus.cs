@@ -24,7 +24,7 @@ namespace reromanlee.EventAggregator
     /// reported as an error instead of crashing the player with an undebuggable stack overflow.
     /// The check is compiled out of release builds entirely.</para>
     /// <para><b>Debugging.</b> In the editor, every bus reports its publishes and deliveries to the
-    /// Event Debugger window (Tools ▸ Event Debugger), where instances appear as "EventBus #N" or the
+    /// Event Debugger window (Tools ▸ Event Debugger), where instances appear as "EventBus N" or the
     /// name given via <see cref="SetDebugName"/>. All of this instrumentation — including calls to
     /// <see cref="SetDebugName"/> — is compiled out of player builds and costs nothing there.</para>
     /// </remarks>
@@ -72,10 +72,12 @@ namespace reromanlee.EventAggregator
 
         /// <summary>
         /// Names this bus in the editor's Event Debugger window in place of the default
-        /// "EventBus #N". Editor-only: calls to this method are stripped from player builds by the
+        /// "EventBus N". Editor-only: calls to this method are stripped from player builds by the
         /// compiler, so it can be called unconditionally from runtime code at zero build cost.
         /// </summary>
-        /// <param name="name">The display name shown in the debugger window.</param>
+        /// <param name="name">The display name shown in the debugger window. Avoid ending it with
+        /// Unity menu shortcut notation ('#', '%', '&amp;' or '_' followed by a character), which
+        /// editor dropdowns would render as a keyboard shortcut instead of text.</param>
         [System.Diagnostics.Conditional("UNITY_EDITOR")]
         public void SetDebugName(string name)
         {

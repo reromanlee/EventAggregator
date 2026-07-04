@@ -82,6 +82,14 @@
     flex-grow: 1;
 }
 
+.event-block {
+    margin-bottom: 4px;
+}
+
+#time {
+    margin-right: 3px;
+}
+
 .container-odd {
     margin-top: 0;
     margin-right: 0;

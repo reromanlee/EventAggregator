@@ -32,6 +32,9 @@ namespace reromanlee.EventAggregator
             /// <summary>Monotonically increasing id; never reset, so consumers can poll incrementally.</summary>
             public readonly long Sequence;
             public readonly int BusId;
+            /// <summary>Groups a root publish with every entry it caused (deliveries and chained
+            /// publishes, across buses). Lets consumers render whole chain reactions as one unit.</summary>
+            public readonly long ChainId;
             public readonly EntryKind Kind;
             /// <summary>Chain depth: 0 for a root publish, +1 for every level of events firing events.
             /// Deliveries are recorded one deeper than the publish that produced them.</summary>
@@ -42,16 +45,20 @@ namespace reromanlee.EventAggregator
             public readonly string SourceName;
             /// <summary>The receiving listener's type name. Null for <see cref="EntryKind.Publish"/>.</summary>
             public readonly string TargetName;
+            /// <summary>Local wall-clock time when the entry was recorded (i.e. when the publish happened).</summary>
+            public readonly DateTime Timestamp;
 
-            public TraceEntry(long sequence, int busId, EntryKind kind, int depth, string eventName, string sourceName, string targetName)
+            public TraceEntry(long sequence, int busId, long chainId, EntryKind kind, int depth, string eventName, string sourceName, string targetName, DateTime timestamp)
             {
                 Sequence = sequence;
                 BusId = busId;
+                ChainId = chainId;
                 Kind = kind;
                 Depth = depth;
                 EventName = eventName;
                 SourceName = sourceName;
                 TargetName = targetName;
+                Timestamp = timestamp;
             }
         }
 
@@ -94,6 +101,11 @@ namespace reromanlee.EventAggregator
         // The type name of the listener whose Handle is currently executing on this thread.
         // Lets chained publishes attribute themselves to the listener that fired them.
         [ThreadStatic] private static string currentHandler;
+
+        // The chain a publish on this thread belongs to; a new id is minted at every root publish
+        // and inherited by everything that publish causes, even across bus instances.
+        [ThreadStatic] private static long currentChain;
+        private static long nextChain;
 
         /// <summary>Bumped on every mutation (entry, registration, rename, clear). Poll this cheaply
         /// and only copy entries when it changed.</summary>
@@ -150,7 +162,9 @@ namespace reromanlee.EventAggregator
             {
                 foreach (BusRecord record in buses)
                 {
-                    target.Add(new BusInfo(record.Id, record.CustomName ?? $"EventBus #{record.Id}", record.Disposed));
+                    // No '#' in the default name: Unity menus parse a trailing "#N" as a
+                    // Shift+N keyboard shortcut, which would mangle the dropdown label.
+                    target.Add(new BusInfo(record.Id, record.CustomName ?? $"EventBus {record.Id}", record.Disposed));
                 }
             }
         }
@@ -159,14 +173,18 @@ namespace reromanlee.EventAggregator
         /// this thread (chained publish), or resolved from the call stack for root publishes.</summary>
         internal static void OnPublish(int busId, Type eventType, int depth)
         {
+            if (depth == 0)
+            {
+                currentChain = Interlocked.Increment(ref nextChain);
+            }
             string publisher = currentHandler ?? ResolveExternalPublisher();
-            Append(busId, EntryKind.Publish, depth, eventType.Name, publisher, null);
+            Append(busId, currentChain, EntryKind.Publish, depth, eventType.Name, publisher, null);
         }
 
         /// <summary>Records one event reaching one listener.</summary>
         internal static void OnDelivery(int busId, Type eventType, string listenerName, int depth)
         {
-            Append(busId, EntryKind.Delivery, depth, eventType.Name, null, listenerName);
+            Append(busId, currentChain, EntryKind.Delivery, depth, eventType.Name, null, listenerName);
         }
 
         /// <summary>Marks <paramref name="listenerName"/> as the executing handler on this thread and
@@ -228,7 +246,7 @@ namespace reromanlee.EventAggregator
             return null;
         }
 
-        private static void Append(int busId, EntryKind kind, int depth, string eventName, string sourceName, string targetName)
+        private static void Append(int busId, long chainId, EntryKind kind, int depth, string eventName, string sourceName, string targetName)
         {
             lock (gate)
             {
@@ -236,7 +254,7 @@ namespace reromanlee.EventAggregator
                 {
                     entries.RemoveRange(0, TrimChunk);
                 }
-                entries.Add(new TraceEntry(nextSequence++, busId, kind, depth, eventName, sourceName, targetName));
+                entries.Add(new TraceEntry(nextSequence++, busId, chainId, kind, depth, eventName, sourceName, targetName, DateTime.Now));
                 version++;
             }
         }

@@ -8,17 +8,22 @@ namespace reromanlee.EventAggregator.Editor
     /// <summary>
     /// Live view of every <see cref="EventBus"/> in the current session: which events fired,
     /// who published them, which listeners received them, and how deep the chain reaction went.
-    /// Data comes from the editor-only <see cref="EventBusDebugger"/> trace; player builds are
-    /// completely unaffected.
+    /// Each root publish and everything it caused form one block; blocks are chronological with
+    /// the newest at the bottom, and the view follows new events automatically unless the user
+    /// scrolled up to read history — returning to the bottom resumes following. Data comes from
+    /// the editor-only <see cref="EventBusDebugger"/> trace; player builds are completely unaffected.
     /// </summary>
     internal class EventDebugger : EditorWindow
     {
         private const string WindowName = "Event Debugger";
         private const string AllBusesChoice = "All Buses";
         private const string DisposedSuffix = " (disposed)";
-        // Rows kept in the UI; oldest are removed in pairs so the zebra striping never flips.
+        // Rows kept in the UI; once exceeded, the oldest chain blocks are dropped from the top.
         private const int MaxVisibleRows = 2000;
         private const double PollInterval = 0.1;
+        // How close to the bottom (in pixels) the scroll must be to keep following new events.
+        // Scrolling up further than this detaches the view; scrolling back re-attaches it.
+        private const float StickToBottomSlack = 30f;
 
         [SerializeField] private VisualTreeAsset eventDebuggerAsset;
         [SerializeField] private VisualTreeAsset publisherAsset;
@@ -28,7 +33,7 @@ namespace reromanlee.EventAggregator.Editor
         [SerializeField] private Texture2D windowIconLight;
 
         // Serialized so the selection survives domain reloads. Bus display names are deterministic
-        // per session ("EventBus #1", ...), so the selection also carries across play sessions.
+        // per session ("EventBus 1", ...), so the selection also carries across play sessions.
         [SerializeField] private string selectedBus = AllBusesChoice;
 
         private readonly List<EventBusDebugger.TraceEntry> entryBuffer = new();
@@ -38,8 +43,16 @@ namespace reromanlee.EventAggregator.Editor
         private int lastVersion = -1;
         private int lastClearCount;
         private long lastSequence = -1;
-        private int visibleRowCount;
         private double nextPollTime;
+
+        // The block currently receiving rows, and which chain it belongs to.
+        private VisualElement currentBlock;
+        private long currentBlockChainId = -1;
+        private int totalRowCount;
+
+        // Zebra state: flipped once per row and never reset across blocks, so stripes stay
+        // alternating even between the last row of one chain and the root of the next.
+        private bool zebraEven;
 
         private VisualElement EventContainerElement
         {
@@ -104,10 +117,12 @@ namespace reromanlee.EventAggregator.Editor
 
         private void OnDropdownValueChange(ChangeEvent<string> callback)
         {
-            string value = callback.newValue ?? AllBusesChoice;
-            selectedBus = value.EndsWith(DisposedSuffix)
-                ? value.Substring(0, value.Length - DisposedSuffix.Length)
-                : value;
+            // Resolve by index, not by label text: Unity renders menu shortcut notation
+            // (a trailing "#N" etc.) specially, so labels are not reliable identifiers.
+            int index = InstanceDropdownElement.index;
+            selectedBus = index > 0 && index - 1 < busBuffer.Count
+                ? busBuffer[index - 1].DisplayName
+                : AllBusesChoice;
             RebuildView();
         }
 
@@ -141,12 +156,19 @@ namespace reromanlee.EventAggregator.Editor
         {
             lastClearCount = EventBusDebugger.ClearCount;
             lastSequence = -1;
-            visibleRowCount = 0;
+            currentBlock = null;
+            currentBlockChainId = -1;
+            totalRowCount = 0;
+            zebraEven = false;
             EventContainerElement.Clear();
             RefreshDropdownChoices();
             AppendNewEntries();
+            // A fresh view (filter change, clear, window open) always starts at the newest events.
+            ScrollToBottomDeferred();
         }
 
+        /// <summary>Keeps the dropdown choices aligned with <see cref="busBuffer"/>:
+        /// choice 0 is "All Buses", choice N is busBuffer[N - 1].</summary>
         private void RefreshDropdownChoices()
         {
             EventBusDebugger.GetBuses(busBuffer);
@@ -176,7 +198,7 @@ namespace reromanlee.EventAggregator.Editor
             }
 
             int selectedBusId = ResolveSelectedBusId();
-            bool stickToBottom = IsScrolledToBottom();
+            bool followBottom = IsNearBottom();
             VisualElement container = EventContainerElement;
 
             foreach (EventBusDebugger.TraceEntry entry in entryBuffer)
@@ -185,24 +207,57 @@ namespace reromanlee.EventAggregator.Editor
                 {
                     continue;
                 }
-                container.Add(CreateRow(entry));
-                visibleRowCount++;
-            }
 
-            // Drop the oldest rows in pairs so odd/even classes stay aligned with row parity.
-            while (container.childCount > MaxVisibleRows)
-            {
-                container.RemoveAt(0);
-                if (container.childCount > 0)
+                // A new chain starts a new block at the bottom; rows keep appending to the block
+                // of their chain so a chain reaction always reads downward in firing order.
+                if (currentBlock == null || entry.ChainId != currentBlockChainId)
                 {
-                    container.RemoveAt(0);
+                    currentBlock = new VisualElement();
+                    currentBlock.AddToClassList("event-block");
+                    currentBlockChainId = entry.ChainId;
+                    container.Add(currentBlock);
                 }
+
+                VisualElement row = CreateRow(entry);
+                row.AddToClassList(zebraEven ? "container-even" : "container-odd");
+                zebraEven = !zebraEven;
+                totalRowCount++;
+                currentBlock.Add(row);
             }
 
-            if (stickToBottom)
+            TrimOldestBlocks(container);
+
+            if (followBottom)
             {
                 ScrollToBottomDeferred();
             }
+        }
+
+        /// <summary>Drops whole blocks from the top (the oldest chains) once over the row budget.
+        /// The newest block is always kept, however large.</summary>
+        private void TrimOldestBlocks(VisualElement container)
+        {
+            while (totalRowCount > MaxVisibleRows && container.childCount > 1)
+            {
+                VisualElement oldest = container[0];
+                totalRowCount -= oldest.childCount;
+                oldest.RemoveFromHierarchy();
+            }
+        }
+
+        /// <summary>True while the view should follow new events: no scrollbar yet, or scrolled to
+        /// within <see cref="StickToBottomSlack"/> of the bottom.</summary>
+        private bool IsNearBottom()
+        {
+            Scroller scroller = ScrollViewElement.verticalScroller;
+            return scroller.highValue <= 0 || scroller.value >= scroller.highValue - StickToBottomSlack;
+        }
+
+        private void ScrollToBottomDeferred()
+        {
+            ScrollView scrollView = ScrollViewElement;
+            // Deferred one tick so the freshly added rows have a layout before scrolling to them.
+            scrollView.schedule.Execute(() => scrollView.verticalScroller.value = scrollView.verticalScroller.highValue);
         }
 
         /// <returns>-1 for all buses; <see cref="int.MinValue"/> when the selected bus is unknown,
@@ -225,24 +280,9 @@ namespace reromanlee.EventAggregator.Editor
 
         private VisualElement CreateRow(in EventBusDebugger.TraceEntry entry)
         {
-            VisualElement row = entry.Kind == EventBusDebugger.EntryKind.Publish
-                ? new Publisher(publisherAsset, entry.SourceName, entry.EventName, entry.Depth)
-                : new Listener(listenerAsset, entry.TargetName, entry.EventName, entry.Depth);
-            row.AddToClassList(visibleRowCount % 2 == 0 ? "container-odd" : "container-even");
-            return row;
-        }
-
-        private bool IsScrolledToBottom()
-        {
-            Scroller scroller = ScrollViewElement.verticalScroller;
-            return scroller.highValue <= 0 || scroller.value >= scroller.highValue - 1;
-        }
-
-        private void ScrollToBottomDeferred()
-        {
-            ScrollView scrollView = ScrollViewElement;
-            // Deferred one tick so the freshly added rows have a layout before scrolling to them.
-            scrollView.schedule.Execute(() => scrollView.verticalScroller.value = scrollView.verticalScroller.highValue);
+            return entry.Kind == EventBusDebugger.EntryKind.Publish
+                ? new Publisher(publisherAsset, entry.SourceName, entry.EventName, entry.Depth, entry.Timestamp)
+                : new Listener(listenerAsset, entry.TargetName, entry.EventName, entry.Depth, entry.Timestamp);
         }
     }
 }
