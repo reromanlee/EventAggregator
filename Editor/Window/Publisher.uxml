@@ -1,7 +1,6 @@
 <ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" xsi="http://www.w3.org/2001/XMLSchema-instance" engine="UnityEngine.UIElements" editor="UnityEditor.UIElements" noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd" editor-extension-mode="False">
     <Style src="project://database/Packages/com.reromanlee.eventaggregator/Editor/Window/EventDebugger.uss?fileID=7433441132597879392&amp;guid=3ade6b81fed3c69479eedbf8d28fece4&amp;type=3#EventDebugger"/>
     <ui:VisualElement name="event-container" class="publish-event">
-        <ui:VisualElement name="border-left" class="border-left-icon"/>
         <ui:VisualElement class="publisher-icon"/>
         <ui:Label tabindex="-1" text="PublisherName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="publisher-name" class="publisher-name"/>
         <ui:VisualElement class="broadcast-icon" style="background-image: url(&quot;project://database/Packages/com.reromanlee.eventaggregator/Editor/Textures/broadcast.png?fileID=2800000&amp;guid=854018f5f66bc6c42a057eff09a09ff6&amp;type=3#broadcast&quot;);"/>

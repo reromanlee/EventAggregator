@@ -2,38 +2,21 @@ using UnityEngine.UIElements;
 
 namespace reromanlee.EventAggregator.Editor
 {
+    /// <summary>A trace row reading "event went to listener", indented by chain depth.</summary>
     internal class Listener : VisualElement
     {
-        public Listener(VisualTreeAsset listenerAsset)
+        public Listener(VisualTreeAsset listenerAsset, string listenerName, string eventName, int eventDepth)
         {
             listenerAsset.CloneTree(this);
-        }
+            this.Q<Label>("listener-name").text = listenerName;
+            this.Q<Label>("event-name").text = eventName;
 
-        public VisualElement EventContainerElement
-        {
-            get => this.Q<VisualElement>("event-container");
-        }
-
-        public string ListenerName
-        {
-            get => this.Q<Label>("listener-name").text;
-            set => this.Q<Label>("listener-name").text = value;
-        }
-
-        public string EventName
-        {
-            get => this.Q<Label>("event-name").text;
-            set => this.Q<Label>("event-name").text = value;
-        }
-
-        public void SetIndentations(int eventDepth)
-        {
-            EventContainerElement.Query<VisualElement>("border-left").ForEach(x => x.RemoveFromHierarchy());
-            for (int x = 0; x < eventDepth; x++)
+            VisualElement container = this.Q<VisualElement>("event-container");
+            for (int i = 0; i < eventDepth; i++)
             {
-                VisualElement borderLeftElement = new();
-                borderLeftElement.AddToClassList("border-left");
-                EventContainerElement.Insert(0, borderLeftElement);
+                VisualElement indentGuide = new();
+                indentGuide.AddToClassList("border-left");
+                container.Insert(0, indentGuide);
             }
         }
     }

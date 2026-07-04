@@ -107,6 +107,23 @@ All members are thread-safe. Publishing is lock-free; subscription changes seria
 
 The implementation is pure C# against .NET Standard 2.1 (`ConcurrentDictionary`, `volatile`, `lock`, `[ThreadStatic]`) with no reflection, no runtime code generation, and no platform-specific calls. It behaves identically under Mono and IL2CPP on all Unity targets — desktop, mobile, consoles, and WebGL (where, without threads, the synchronization simply never contends) — and requires no link.xml or `[Preserve]` attributes under managed stripping.
 
+## Event Debugger window
+
+**Tools ▸ Event Debugger** opens a live trace of every bus in the session: each publish shows who
+fired which event, followed by a row per listener that received it. Events published from inside a
+handler are indented one level deeper, so chain reactions read as a tree. A dropdown filters the
+view to a single bus — instances appear as "EventBus #1", "EventBus #2", … in creation order, or
+under a custom name:
+
+```csharp
+var bus = new EventBus();
+bus.SetDebugName("Gameplay"); // editor-only; this call is stripped from player builds entirely
+```
+
+All of the instrumentation behind the window is compiled only in the editor. Player builds —
+including development builds — contain none of it, so the zero-allocation, lock-free publish path
+is exactly the same with or without the debugger.
+
 ## Recursive events
 
 Handlers publishing further events is normal and supported. What is not survivable is an *infinite* publish cycle (A → B → A → …), which would crash a release player with an undebuggable stack overflow. In the editor and development builds the bus tracks publish depth per thread and reports an error naming the event type once a cycle exceeds depth 64; the check does not exist in release builds, so it costs nothing where performance matters. Fixing the cycle itself remains, deliberately, the developer's job.

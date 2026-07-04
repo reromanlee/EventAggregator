@@ -23,6 +23,10 @@ namespace reromanlee.EventAggregator
     /// (a handler for event A publishing B whose handler publishes A again, forever) is detected and
     /// reported as an error instead of crashing the player with an undebuggable stack overflow.
     /// The check is compiled out of release builds entirely.</para>
+    /// <para><b>Debugging.</b> In the editor, every bus reports its publishes and deliveries to the
+    /// Event Debugger window (Tools ▸ Event Debugger), where instances appear as "EventBus #N" or the
+    /// name given via <see cref="SetDebugName"/>. All of this instrumentation — including calls to
+    /// <see cref="SetDebugName"/> — is compiled out of player builds and costs nothing there.</para>
     /// </remarks>
     public sealed class EventBus : IEventBus, IDisposable
     {
@@ -50,6 +54,36 @@ namespace reromanlee.EventAggregator
 
         private volatile bool isDisposed;
 
+#if UNITY_EDITOR
+        // Identifies this instance in the editor-only Event Debugger window (Tools ▸ Event Debugger).
+        private readonly int debugId;
+#endif
+
+        /// <summary>
+        /// Creates an empty bus. In the editor, the instance registers itself with the
+        /// Event Debugger window (Tools ▸ Event Debugger); player builds skip registration entirely.
+        /// </summary>
+        public EventBus()
+        {
+#if UNITY_EDITOR
+            debugId = EventBusDebugger.Register();
+#endif
+        }
+
+        /// <summary>
+        /// Names this bus in the editor's Event Debugger window in place of the default
+        /// "EventBus #N". Editor-only: calls to this method are stripped from player builds by the
+        /// compiler, so it can be called unconditionally from runtime code at zero build cost.
+        /// </summary>
+        /// <param name="name">The display name shown in the debugger window.</param>
+        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        public void SetDebugName(string name)
+        {
+#if UNITY_EDITOR
+            EventBusDebugger.SetBusName(debugId, name);
+#endif
+        }
+
         /// <inheritdoc/>
         /// <exception cref="ObjectDisposedException">The bus has been disposed.</exception>
         public void Publish<TEvent>(TEvent eventData)
@@ -58,6 +92,12 @@ namespace reromanlee.EventAggregator
             {
                 throw new ObjectDisposedException(nameof(EventBus));
             }
+
+#if UNITY_EDITOR
+            // Editor-only trace for the Event Debugger window. Recorded before the subscriber
+            // checks so that events nobody listens to still show up as "fired, went nowhere".
+            EventBusDebugger.OnPublish(debugId, typeof(TEvent), publishDepth);
+#endif
 
             // No subscribers for this event type (yet) is a normal situation, not an error:
             // the listening system may simply not be active. Deliberately a silent no-op.
@@ -85,6 +125,15 @@ namespace reromanlee.EventAggregator
 #endif
                 for (int i = 0; i < snapshot.Length; i++)
                 {
+#if UNITY_EDITOR
+                    // Record the delivery one level deeper than its publish, and mark this listener
+                    // as the executing handler so any events it publishes are attributed to it.
+                    string listenerName = snapshot[i].GetType().Name;
+                    EventBusDebugger.OnDelivery(debugId, typeof(TEvent), listenerName, publishDepth);
+                    string previousHandler = EventBusDebugger.BeginHandler(listenerName);
+                    try
+                    {
+#endif
                     try
                     {
                         snapshot[i].Handle(eventData);
@@ -94,6 +143,13 @@ namespace reromanlee.EventAggregator
                         Debug.LogError(
                             $"Listener '{snapshot[i].GetType().Name}' threw while handling '{typeof(TEvent).Name}':\n{exception}");
                     }
+#if UNITY_EDITOR
+                    }
+                    finally
+                    {
+                        EventBusDebugger.EndHandler(previousHandler);
+                    }
+#endif
                 }
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
@@ -191,6 +247,10 @@ namespace reromanlee.EventAggregator
                     return;
                 }
                 isDisposed = true;
+
+#if UNITY_EDITOR
+                EventBusDebugger.Unregister(debugId);
+#endif
 
                 // Empty every snapshot so a publish that already passed the disposed check
                 // delivers to no one instead of to stale listeners.
