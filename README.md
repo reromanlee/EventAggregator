@@ -2,6 +2,8 @@
 
 A minimal, allocation-free, type-keyed publish/subscribe event bus for Unity. Producers publish plain C# objects or structs; listeners subscribe per event type. No reflection, no code generation, no dependencies — two interfaces and one class.
 
+![Event Debugger showcase](.github/readme-event-debugger.gif)
+
 ## Features
 
 - **Zero-GC publishing** — `Publish` allocates no memory and takes no locks, so it is safe to call every frame on hot paths.
