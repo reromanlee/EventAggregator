@@ -40,7 +40,9 @@ namespace reromanlee.EventAggregator
         // Listener groups keyed by event type. A ConcurrentDictionary lets the publish path read
         // lock-free while Subscribe/Unsubscribe/Dispose mutate under mutationLock. Entries are only
         // ever added or cleared, never replaced, so a raced read always sees a valid group.
-        private readonly ConcurrentDictionary<Type, IEventListeners> listenerTypes = new();
+        // concurrencyLevel is 1 because writes are already serialized by mutationLock; the default
+        // would allocate one internal lock stripe per CPU core per bus for nothing.
+        private readonly ConcurrentDictionary<Type, IEventListeners> listenerTypes = new(concurrencyLevel: 1, capacity: 31);
 
         // Serializes all mutations (Subscribe/Unsubscribe/Dispose). Never held while listeners run,
         // so handlers are free to publish, subscribe, or unsubscribe re-entrantly without deadlocking.
