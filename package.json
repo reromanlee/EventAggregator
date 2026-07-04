@@ -4,6 +4,7 @@
   "displayName": "EventAggregator",
   "description": "A simple event aggregator implementation for Unity.",
   "unity": "6000.0",
+  "license": "MIT",
   "documentationUrl": "https://github.com/reromanlee/EventAggregator#readme",
   "changelogUrl": "https://github.com/reromanlee/EventAggregator/blob/main/CHANGELOG.md",
   "keywords": [

@@ -113,4 +113,4 @@ Handlers publishing further events is normal and supported. What is not survivab
 
 ## License
 
-No license file yet — see repository.
+[MIT](LICENSE) © Roman Likhadievski
