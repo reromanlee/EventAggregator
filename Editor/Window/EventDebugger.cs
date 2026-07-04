@@ -245,8 +245,9 @@ namespace reromanlee.EventAggregator.Editor
             }
         }
 
-        /// <summary>True while the view should follow new events: no scrollbar yet, or scrolled to
-        /// within <see cref="StickToBottomSlack"/> of the bottom.</summary>
+        /// <summary>True while the view should follow new events: no scrollable content yet, or
+        /// scrolled to within <see cref="StickToBottomSlack"/> of the bottom. Evaluated before rows
+        /// are appended, while the scroller still reflects a settled layout.</summary>
         private bool IsNearBottom()
         {
             Scroller scroller = ScrollViewElement.verticalScroller;
@@ -255,9 +256,23 @@ namespace reromanlee.EventAggregator.Editor
 
         private void ScrollToBottomDeferred()
         {
+            // Scheduled items can run before the freshly added rows get a layout, in which case the
+            // scroller range still describes the old content. Snap on two consecutive ticks: the
+            // first covers the case where layout already ran, the second sees the settled range.
             ScrollView scrollView = ScrollViewElement;
-            // Deferred one tick so the freshly added rows have a layout before scrolling to them.
-            scrollView.schedule.Execute(() => scrollView.verticalScroller.value = scrollView.verticalScroller.highValue);
+            scrollView.schedule.Execute(() =>
+            {
+                SnapToBottom(scrollView);
+                scrollView.schedule.Execute(() => SnapToBottom(scrollView));
+            });
+        }
+
+        private static void SnapToBottom(ScrollView scrollView)
+        {
+            Scroller scroller = scrollView.verticalScroller;
+            // Never below zero: with always-visible scrollers and content shorter than the viewport,
+            // highValue is negative, and snapping to it would push the content downward.
+            scroller.value = Mathf.Max(0f, scroller.highValue);
         }
 
         /// <returns>-1 for all buses; <see cref="int.MinValue"/> when the selected bus is unknown,
