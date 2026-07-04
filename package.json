@@ -1,5 +1,5 @@
 {
-  "name": "com.reromanlee.EventAggregator",
+  "name": "com.reromanlee.eventaggregator",
   "version": "1.0.0",
   "displayName": "EventAggregator",
   "description": "A simple event aggregator implementation for Unity.",
