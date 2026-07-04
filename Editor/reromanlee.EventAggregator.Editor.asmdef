@@ -1,7 +1,9 @@
 {
     "name": "reromanlee.EventAggregator.Editor",
     "rootNamespace": "reromanlee.EventAggregator.Editor",
-    "references": [],
+    "references": [
+        "reromanlee.EventAggregator"
+    ],
     "includePlatforms": [
         "Editor"
     ],

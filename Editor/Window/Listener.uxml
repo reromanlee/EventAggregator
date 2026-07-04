@@ -1,10 +1,10 @@
 <ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" xsi="http://www.w3.org/2001/XMLSchema-instance" engine="UnityEngine.UIElements" editor="UnityEditor.UIElements" noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd" editor-extension-mode="False">
-    <Style src="./EventAggregator.uss" />
-    <ui:VisualElement name="event-content" class="publish-event">
-        <ui:VisualElement class="event-icon" />
-        <ui:Label tabindex="-1" text="EventName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="event-name" class="event-name" />
-        <ui:VisualElement class="arrow-right-icon" />
-        <ui:VisualElement class="publisher-icon" />
-        <ui:Label tabindex="-1" text="ListenerName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="listener-name" class="publisher-name" />
+    <Style src="project://database/Packages/com.reromanlee.eventaggregator/Editor/Window/EventDebugger.uss?fileID=7433441132597879392&amp;guid=3ade6b81fed3c69479eedbf8d28fece4&amp;type=3#EventDebugger"/>
+    <ui:VisualElement name="event-container" class="publish-event">
+        <ui:VisualElement class="event-icon"/>
+        <ui:Label tabindex="-1" text="EventName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="event-name" class="event-name"/>
+        <ui:VisualElement class="arrow-right-icon"/>
+        <ui:VisualElement class="publisher-icon"/>
+        <ui:Label tabindex="-1" text="ListenerName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="listener-name" class="publisher-name"/>
     </ui:VisualElement>
 </ui:UXML>
