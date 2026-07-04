@@ -1,0 +1,14 @@
+{
+  "name": "com.reromanlee.EventAggregator",
+  "version": "1.0.0",
+  "displayName": "EventAggregator",
+  "description": "A simple event aggregator implementation for Unity.",
+  "unity": "6000.0",
+  "documentationUrl": "",
+  "changelogUrl": "",
+  "dependencies": {},
+  "author": {
+    "name": "Roman Likhadievski",
+    "url": "https://github.com/reromanlee"
+  }
+}
