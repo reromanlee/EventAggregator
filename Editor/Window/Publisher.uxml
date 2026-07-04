@@ -1,0 +1,11 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" xsi="http://www.w3.org/2001/XMLSchema-instance" engine="UnityEngine.UIElements" editor="UnityEditor.UIElements" noNamespaceSchemaLocation="../../../UIElementsSchema/UIElements.xsd" editor-extension-mode="False">
+    <Style src="./EventAggregator.uss" />
+    <ui:VisualElement name="event-content" class="publish-event">
+        <ui:VisualElement name="border-left" class="border-left-icon" />
+        <ui:VisualElement class="publisher-icon" />
+        <ui:Label tabindex="-1" text="PublisherName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="publisher-name" class="publisher-name" />
+        <ui:VisualElement class="broadcast-icon" style="background-image: url(&quot;../Textures/broadcast.png&quot;);" />
+        <ui:VisualElement class="event-icon" />
+        <ui:Label tabindex="-1" text="EventName" parse-escape-sequences="true" display-tooltip-when-elided="true" name="event-name" class="event-name" />
+    </ui:VisualElement>
+</ui:UXML>
