@@ -16,4 +16,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Duplicate-subscription protection and null-argument validation on `Subscribe`/`Unsubscribe`.
 - Recursive-publish depth guard in the editor and development builds that turns infinite publish loops into a clear error instead of a stack-overflow crash; compiled out of release builds.
 - Disposal semantics designed for Unity teardown: `Unsubscribe` after `Dispose` is a safe no-op, while `Publish`/`Subscribe` throw `ObjectDisposedException`.
+- Event Debugger window (Tools ▸ Event Debugger): live editor-only trace of publishes and deliveries per bus, with console-style timestamps, chain-depth indentation, per-instance filtering, sticky follow-scrolling, and `EventBus.SetDebugName` for readable instance names. No instrumentation is compiled into player builds.
 - XML documentation for the entire public API.

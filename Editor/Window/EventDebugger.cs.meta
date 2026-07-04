@@ -1,0 +1,17 @@
+fileFormatVersion: 2
+guid: fc2dbe9dc3de28f49b95a3ff9fada6d8
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - m_ViewDataDictionary: {instanceID: 0}
+  - eventDebuggerAsset: {fileID: 9197481963319205126, guid: 71b8e1f60e82f8e42aa753ec0699ec31, type: 3}
+  - publisherAsset: {fileID: 9197481963319205126, guid: 41d70435119848f4591ef52760a2ffcc, type: 3}
+  - listenerAsset: {fileID: 9197481963319205126, guid: 4cbb61980b7cc074ba037f6e92a7104a, type: 3}
+  - windowIconDark: {fileID: 2800000, guid: 7231dbdc248b6ee44ab6c50fd0fad9e8, type: 3}
+  - windowIconLight: {fileID: 2800000, guid: 1df4d2c5ce9f8da4d81e426bef126369, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
