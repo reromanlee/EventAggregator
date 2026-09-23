@@ -17,7 +17,7 @@ A minimal, allocation-free, type-keyed publish/subscribe event bus for Unity. Pr
 In Unity, open **Window ▸ Package Manager ▸ + ▸ Add package from git URL…** and enter:
 
 ```
-https://github.com/reromanlee/EventAggregator.git
+https://github.com/reromanlee/EventAggregator.git?path=/UnityPackage
 ```
 
 Or add it to `Packages/manifest.json` directly:
@@ -25,7 +25,7 @@ Or add it to `Packages/manifest.json` directly:
 ```json
 {
   "dependencies": {
-    "com.reromanlee.eventaggregator": "https://github.com/reromanlee/EventAggregator.git"
+    "com.reromanlee.eventaggregator": "https://github.com/reromanlee/EventAggregator.git?path=/UnityPackage"
   }
 }
 ```
