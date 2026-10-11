@@ -1,0 +1,23 @@
+{
+  "name": "com.reromanlee.eventaggregator",
+  "version": "1.0.0",
+  "displayName": "EventAggregator",
+  "description": "A minimal, allocation-free, type-keyed publish/subscribe event bus for Unity. Producers publish plain C# objects or structs; listeners subscribe per event type. No reflection, no code generation, no dependencies - two interfaces and one class.",
+  "unity": "6000.0",
+  "license": "MIT",
+  "documentationUrl": "https://github.com/reromanlee/EventAggregator#readme",
+  "changelogUrl": "https://github.com/reromanlee/EventAggregator/blob/main/CHANGELOG.md",
+  "keywords": [
+    "events",
+    "event-bus",
+    "event-aggregator",
+    "pubsub",
+    "messaging"
+  ],
+  "licensesUrl": "https://github.com/reromanlee/EventAggregator/blob/main/LICENSE.md",
+  "author": {
+    "name": "Roman Likhadievski",
+    "url": "https://github.com/reromanlee",
+    "email": "contact@reromanlee.com"
+  }
+}
