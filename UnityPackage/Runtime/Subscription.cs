@@ -18,7 +18,9 @@ namespace reromanlee.EventAggregator
         /// <summary>Slot in the owning group's current array. Only read or written under the bus lock.</summary>
         public int Index;
 
-        private volatile bool isActive = true;
+        // Deliberately not volatile: the publish path reads it after the bus's single acquire, and IL2CPP would turn
+        // a volatile read into a full fence per delivery. Same-thread unsubscription is always seen immediately.
+        private bool isActive = true;
 
         public Subscription(IEventListener<TEvent> listener, int index)
         {

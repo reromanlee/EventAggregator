@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace reromanlee.EventAggregator
 {
@@ -14,18 +15,18 @@ namespace reromanlee.EventAggregator
     }
 
     /// <summary>
-    /// The listeners subscribed to one event type, kept in an append-only array that publishers read without
-    /// locking or allocating.
+    /// The listeners subscribed to one event type, kept in an append-only array that publishers read through an
+    /// immutable <see cref="ListenerSnapshot{TEvent}"/> without locking or allocating.
     /// </summary>
     /// <remarks>
-    /// <para>Subscribing appends into spare capacity. Unsubscribing deactivates the subscription and clears its
-    /// slot, which releases the listener immediately and leaves a hole. Holes are compacted into a fresh array
-    /// once they outnumber live subscriptions, so every mutation is amortized O(1) and bursts of thousands of
-    /// subscriptions produce linear, not quadratic, garbage.</para>
-    /// <para>Within one array instance a slot is written once and afterwards only cleared, and compaction always
-    /// publishes a new array, so a publish iterating any array it obtained visits each live listener at most
-    /// once and never one added after it started. Mutating members must be called under the owning bus's lock;
-    /// <see cref="GetSubscriptions"/> and <see cref="ActiveCount"/> may be read from any thread.</para>
+    /// <para>Subscribing appends into spare capacity and publishes a new snapshot. Unsubscribing deactivates the
+    /// subscription and clears its slot, which releases the listener immediately and leaves a hole. Holes are
+    /// compacted into a fresh array once they outnumber live subscriptions, so every mutation is amortized O(1)
+    /// and bursts of thousands of subscriptions produce linear, not quadratic, garbage.</para>
+    /// <para>Within one array a slot is written once and afterwards only cleared, and compaction always starts a
+    /// new array, so a publish iterating any snapshot visits each live listener at most once and never one added
+    /// after it started. Mutating members must be called under the owning bus's lock. <see cref="Snapshot"/> and
+    /// <see cref="ActiveCount"/> may be read from any thread after the bus's acquire read of its group array.</para>
     /// </remarks>
     /// <typeparam name="TEvent">The event type this group's listeners handle.</typeparam>
     internal sealed class EventListeners<TEvent> : IEventListeners
@@ -36,28 +37,17 @@ namespace reromanlee.EventAggregator
         // switch to a lookup so large groups stay O(1) per mutation.
         private const int LookupThreshold = 8;
 
-        // Writers publish the array before the used count and readers load the count before the array, so a
-        // reader never indexes past a slot it is guaranteed to see.
-        private volatile Subscription<TEvent>[] subscriptions = Array.Empty<Subscription<TEvent>>();
-        private volatile int usedCount;
-        private volatile int activeCount;
+        // Written with release semantics; read plainly by publishers, whose preceding acquire orders the read.
+        private ListenerSnapshot<TEvent> snapshot = ListenerSnapshot<TEvent>.Empty;
+        private int activeCount;
         private int holeCount;
         private Dictionary<IEventListener<TEvent>, Subscription<TEvent>> lookup;
 
-        /// <summary>The number of subscribed listeners. Lock-free.</summary>
-        public int ActiveCount => activeCount;
+        /// <summary>The subscriptions to dispatch to. Never null.</summary>
+        public ListenerSnapshot<TEvent> Snapshot => snapshot;
 
-        /// <summary>
-        /// Returns the array to dispatch from and how many of its slots to visit. Null slots are holes left by
-        /// removals; inactive entries belong to listeners removed while this array was in use. Lock-free.
-        /// </summary>
-        public Subscription<TEvent>[] GetSubscriptions(out int length)
-        {
-            int used = usedCount;
-            Subscription<TEvent>[] current = subscriptions;
-            length = used < current.Length ? used : current.Length;
-            return current;
-        }
+        /// <summary>The number of subscribed listeners.</summary>
+        public int ActiveCount => activeCount;
 
         /// <summary>Subscribes a listener unless it is already subscribed. Returns false on a duplicate.</summary>
         public bool Add(IEventListener<TEvent> listener)
@@ -67,17 +57,16 @@ namespace reromanlee.EventAggregator
                 return false;
             }
 
-            Subscription<TEvent>[] current = subscriptions;
-            int used = usedCount;
-            if (used == current.Length)
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
+            int count = snapshot.Count;
+            if (count == subscriptions.Length)
             {
-                current = Rebuild(Math.Max(MinimumCapacity, (activeCount + 1) * 2));
-                used = usedCount;
+                subscriptions = Compact(Math.Max(MinimumCapacity, (activeCount + 1) * 2), out count);
             }
 
-            Subscription<TEvent> subscription = new(listener, used);
-            current[used] = subscription;
-            usedCount = used + 1;
+            Subscription<TEvent> subscription = new(listener, count);
+            subscriptions[count] = subscription;
+            Publish(subscriptions, count + 1);
             activeCount++;
 
             if (lookup != null)
@@ -116,28 +105,29 @@ namespace reromanlee.EventAggregator
                 return true;
             }
 
-            Subscription<TEvent>[] current = subscriptions;
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
             int index = subscription.Index;
-            if ((uint)index < (uint)current.Length && ReferenceEquals(current[index], subscription))
+            if ((uint)index < (uint)subscriptions.Length && ReferenceEquals(subscriptions[index], subscription))
             {
-                current[index] = null;
+                subscriptions[index] = null;
                 holeCount++;
             }
 
             if (holeCount > activeCount)
             {
-                Rebuild(Math.Max(MinimumCapacity, activeCount * 2));
+                Subscription<TEvent>[] compacted = Compact(Math.Max(MinimumCapacity, activeCount * 2), out int count);
+                Publish(compacted, count);
             }
             return true;
         }
 
         public void Clear()
         {
-            Subscription<TEvent>[] current = subscriptions;
-            int used = usedCount;
-            for (int i = 0; i < used; i++)
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
+            int count = snapshot.Count;
+            for (int i = 0; i < count; i++)
             {
-                current[i]?.Deactivate();
+                subscriptions[i]?.Deactivate();
             }
             activeCount = 0;
             Reset();
@@ -150,11 +140,11 @@ namespace reromanlee.EventAggregator
                 return lookup.TryGetValue(listener, out Subscription<TEvent> found) ? found : null;
             }
 
-            Subscription<TEvent>[] current = subscriptions;
-            int used = usedCount;
-            for (int i = 0; i < used; i++)
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
+            int count = snapshot.Count;
+            for (int i = 0; i < count; i++)
             {
-                Subscription<TEvent> subscription = current[i];
+                Subscription<TEvent> subscription = subscriptions[i];
                 if (subscription != null && ReferenceEquals(subscription.Listener, listener))
                 {
                     return subscription;
@@ -163,13 +153,13 @@ namespace reromanlee.EventAggregator
             return null;
         }
 
-        /// <summary>Copies live subscriptions, in order, into a new array and publishes it.</summary>
-        private Subscription<TEvent>[] Rebuild(int capacity)
+        /// <summary>Copies live subscriptions, in order, into a new array. The caller publishes it.</summary>
+        private Subscription<TEvent>[] Compact(int capacity, out int count)
         {
-            Subscription<TEvent>[] current = subscriptions;
-            int used = usedCount;
+            Subscription<TEvent>[] current = snapshot.Subscriptions;
+            int used = snapshot.Count;
             Subscription<TEvent>[] next = new Subscription<TEvent>[capacity];
-            int count = 0;
+            count = 0;
             for (int i = 0; i < used; i++)
             {
                 Subscription<TEvent> subscription = current[i];
@@ -179,11 +169,14 @@ namespace reromanlee.EventAggregator
                     next[count++] = subscription;
                 }
             }
-
-            subscriptions = next;
-            usedCount = count;
             holeCount = 0;
             return next;
+        }
+
+        /// <summary>Release semantics: a publisher that sees the snapshot also sees every slot it covers.</summary>
+        private void Publish(Subscription<TEvent>[] subscriptions, int count)
+        {
+            Volatile.Write(ref snapshot, new ListenerSnapshot<TEvent>(subscriptions, count));
         }
 
         private void BuildLookup()
@@ -191,11 +184,11 @@ namespace reromanlee.EventAggregator
             lookup = new Dictionary<IEventListener<TEvent>, Subscription<TEvent>>(
                 activeCount * 2, IdentityComparer<IEventListener<TEvent>>.Instance);
 
-            Subscription<TEvent>[] current = subscriptions;
-            int used = usedCount;
-            for (int i = 0; i < used; i++)
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
+            int count = snapshot.Count;
+            for (int i = 0; i < count; i++)
             {
-                Subscription<TEvent> subscription = current[i];
+                Subscription<TEvent> subscription = subscriptions[i];
                 if (subscription != null)
                 {
                     lookup.Add(subscription.Listener, subscription);
@@ -206,8 +199,7 @@ namespace reromanlee.EventAggregator
         /// <summary>Drops the array and lookup once the group is empty so an idle event type holds no memory.</summary>
         private void Reset()
         {
-            subscriptions = Array.Empty<Subscription<TEvent>>();
-            usedCount = 0;
+            Volatile.Write(ref snapshot, ListenerSnapshot<TEvent>.Empty);
             holeCount = 0;
             lookup = null;
         }

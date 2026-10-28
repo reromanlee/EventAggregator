@@ -47,14 +47,17 @@ namespace reromanlee.EventAggregator
 #endif
 
         // Listener groups indexed by EventTypeIndex<TEvent>.Value. Publish reads lock-free; Subscribe fills an
-        // empty slot or swaps in a grown copy under mutationLock.
+        // empty slot or swaps in a grown copy under mutationLock. Reading this field is the publish path's only
+        // memory fence (IL2CPP turns every volatile read into a full fence); every later read is ordered by it.
         private volatile IEventListeners[] groups = Array.Empty<IEventListeners>();
 
         // Serializes all mutations. Never held while listeners run, so handlers may publish, subscribe, or
         // unsubscribe re-entrantly without deadlocking.
         private readonly object mutationLock = new();
 
-        private volatile bool isDisposed;
+        // Written under mutationLock, read after the acquire of groups; Dispose also empties groups, so a stale
+        // read can only delay the disposed warning, never deliver to a released listener.
+        private bool isDisposed;
         private bool hasWarnedPublishAfterDispose;
 
 #if UNITY_EDITOR
@@ -94,7 +97,9 @@ namespace reromanlee.EventAggregator
         /// </remarks>
         public void Publish<TEvent>(TEvent eventData)
         {
-            if (isDisposed)
+            // Disposal empties every group, so the disposed check only runs on the no-listeners path.
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            if (group == null && isDisposed)
             {
                 WarnPublishAfterDispose<TEvent>();
                 return;
@@ -118,17 +123,18 @@ namespace reromanlee.EventAggregator
 
             // No subscribers for this event type (yet) is a normal situation, not an error: the listening
             // system may simply not be active. Deliberately a silent no-op.
-            EventListeners<TEvent> group = FindGroup<TEvent>();
             if (group == null)
             {
                 return;
             }
 
-            Subscription<TEvent>[] subscriptions = group.GetSubscriptions(out int length);
+            ListenerSnapshot<TEvent> snapshot = group.Snapshot;
+            int length = snapshot.Count;
             if (length == 0)
             {
                 return;
             }
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (depth >= MaxPublishDepth)
@@ -240,11 +246,7 @@ namespace reromanlee.EventAggregator
         /// <inheritdoc/>
         public bool HasListeners<TEvent>()
         {
-            if (isDisposed)
-            {
-                return false;
-            }
-
+            // Disposal empties every group, so a disposed bus reports no listeners without a separate check.
             EventListeners<TEvent> group = FindGroup<TEvent>();
             return group != null && group.ActiveCount > 0;
         }
