@@ -1,307 +1,388 @@
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.UIElements;
 
 namespace reromanlee.EventAggregator.Editor
 {
     /// <summary>
-    /// Live view of every <see cref="EventBus"/> in the current session: which events fired,
-    /// who published them, which listeners received them, and how deep the chain reaction went.
-    /// Each root publish and everything it caused form one block; blocks are chronological with
-    /// the newest at the bottom, and the view follows new events automatically unless the user
-    /// scrolled up to read history — returning to the bottom resumes following. Data comes from
-    /// the editor-only <see cref="EventBusDebugger"/> trace; player builds are completely unaffected.
+    /// Live view of every <see cref="EventBus"/> in the session: which events fired, who published them, which
+    /// listeners received them, and how deep each chain reaction went. Rows are virtualized, so only the visible
+    /// ones exist however long the trace grows. The view follows new events unless scrolled up, and resumes
+    /// following once scrolled back to the bottom. Buses report to it only while the window is open.
     /// </summary>
-    internal class EventDebugger : EditorWindow
+    internal sealed class EventDebugger : EditorWindow
     {
-        private const string WindowName = "Event Debugger";
+        private const string WindowTitle = "Event Debugger";
         private const string AllBusesChoice = "All Buses";
         private const string DisposedSuffix = " (disposed)";
-        // Rows kept in the UI; once exceeded, the oldest chain blocks are dropped from the top.
-        private const int MaxVisibleRows = 2000;
-        private const double PollInterval = 0.1;
-        // How close to the bottom (in pixels) the scroll must be to keep following new events.
-        // Scrolling up further than this detaches the view; scrolling back re-attaches it.
-        private const float StickToBottomSlack = 30f;
 
-        [SerializeField] private VisualTreeAsset eventDebuggerAsset;
-        [SerializeField] private VisualTreeAsset publisherAsset;
-        [SerializeField] private VisualTreeAsset listenerAsset;
+        // Assets are resolved by GUID so the window works wherever the package lives (registry, git, embedded)
+        // and survives layouts restored from older package versions.
+        private const string StyleSheetGuid = "3ade6b81fed3c69479eedbf8d28fece4";
+        private const string IconForLightSkinGuid = "7231dbdc248b6ee44ab6c50fd0fad9e8";
+        private const string IconForDarkSkinGuid = "1df4d2c5ce9f8da4d81e426bef126369";
 
-        [SerializeField] private Texture2D windowIconDark;
-        [SerializeField] private Texture2D windowIconLight;
+        private const int MaxRows = EventBusDebugger.Capacity;
+        private const int TrimChunk = MaxRows / 10;
+        private const long PollIntervalMilliseconds = 100;
+        private const float RowHeight = 20f;
 
-        // Serialized so the selection survives domain reloads. Bus display names are deterministic
-        // per session ("EventBus 1", ...), so the selection also carries across play sessions.
-        [SerializeField] private string selectedBus = AllBusesChoice;
+        // Serialized so the window keeps its setup across domain reloads and editor restarts.
+        [SerializeField] private string selectedBusName = AllBusesChoice;
 
-        private readonly List<EventBusDebugger.TraceEntry> entryBuffer = new();
-        private readonly List<EventBusDebugger.BusInfo> busBuffer = new();
+        private readonly List<EventBusDebugger.TraceEntry> retainedEntries = new();
+        private readonly List<EventBusDebugger.TraceEntry> visibleEntries = new();
+        private readonly List<EventBusDebugger.TraceEntry> pendingEntries = new();
+        private readonly List<EventBusDebugger.BusInfo> buses = new();
 
-        private VisualElement eventDebuggerElement;
+        // Remembers every bus name seen, so rows keep filtering correctly after their bus is forgotten by the hub.
+        private readonly Dictionary<int, string> busNamesById = new();
+        private readonly List<(string Name, bool IsDisposed)> busMenuItems = new();
+        private readonly List<(string Name, bool IsDisposed)> nextBusMenuItems = new();
+
+        private ListView listView;
+        private ScrollView scrollView;
+        private ToolbarMenu busMenu;
+        private Label emptyLabel;
+        private System.Action scrollToBottomAction;
+
+        private bool isRecorderActive;
         private int lastVersion = -1;
-        private int lastClearCount;
+        private int lastClearCount = -1;
         private long lastSequence = -1;
-        private double nextPollTime;
-
-        // The block currently receiving rows, and which chain it belongs to.
-        private VisualElement currentBlock;
-        private long currentBlockChainId = -1;
-        private int totalRowCount;
-
-        // Zebra state: flipped once per row and never reset across blocks, so stripes stay
-        // alternating even between the last row of one chain and the root of the next.
-        private bool zebraEven;
-
-        private VisualElement EventContainerElement
-        {
-            get => eventDebuggerElement.Q<VisualElement>("event-container");
-        }
-
-        private VisualElement ClearButtonElement
-        {
-            get => eventDebuggerElement.Q<VisualElement>("clear-button");
-        }
-
-        private DropdownField InstanceDropdownElement
-        {
-            get => eventDebuggerElement.Q<DropdownField>("instance-dropdown");
-        }
-
-        private ScrollView ScrollViewElement
-        {
-            get => eventDebuggerElement.Q<ScrollView>();
-        }
 
         [MenuItem("Window/Analysis/Event Debugger")]
         public static void ShowWindow()
         {
-            EventDebugger window = GetWindow<EventDebugger>();
-            if (EditorGUIUtility.isProSkin)
-            {
-                window.titleContent = new GUIContent(WindowName, window.windowIconLight);
-            }
-            else
-            {
-                window.titleContent = new GUIContent(WindowName, window.windowIconDark);
-            }
-            window.minSize = new Vector2(600, 400);
-            window.Show();
+            GetWindow<EventDebugger>();
         }
 
         private void OnEnable()
         {
-            eventDebuggerElement = eventDebuggerAsset.CloneTree();
-            eventDebuggerElement.style.flexGrow = 1;
-
-            ClearButtonElement.RegisterCallback<ClickEvent>(OnClearButtonClick);
-            InstanceDropdownElement.RegisterValueChangedCallback(OnDropdownValueChange);
-
-            rootVisualElement.Add(eventDebuggerElement);
-
-            RebuildView();
-            EditorApplication.update += PollTrace;
-            EventBusDebugger.AddRecorder();
+            Texture2D icon = LoadAsset<Texture2D>(EditorGUIUtility.isProSkin ? IconForDarkSkinGuid : IconForLightSkinGuid);
+            titleContent = new GUIContent(WindowTitle, icon);
+            minSize = new Vector2(480f, 200f);
+            SetRecorderActive(true);
         }
 
         private void OnDisable()
         {
-            EventBusDebugger.RemoveRecorder();
-            EditorApplication.update -= PollTrace;
+            SetRecorderActive(false);
         }
 
-        private void OnClearButtonClick(ClickEvent callback)
+        private void CreateGUI()
+        {
+            VisualElement root = rootVisualElement;
+            StyleSheet styleSheet = LoadAsset<StyleSheet>(StyleSheetGuid);
+            if (styleSheet != null)
+            {
+                root.styleSheets.Add(styleSheet);
+            }
+            root.AddToClassList("event-debugger");
+            root.AddToClassList(EditorGUIUtility.isProSkin ? "event-debugger--dark" : "event-debugger--light");
+
+            root.Add(CreateToolbar());
+
+            VisualElement body = new();
+            body.AddToClassList("event-debugger__body");
+            root.Add(body);
+
+            listView = new ListView(visibleEntries, RowHeight, () => new TraceRow(), BindRow)
+            {
+                selectionType = SelectionType.None,
+                showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly,
+                virtualizationMethod = CollectionVirtualizationMethod.FixedHeight,
+            };
+            listView.AddToClassList("event-debugger__list");
+            body.Add(listView);
+            scrollView = listView.Q<ScrollView>();
+
+            emptyLabel = new Label { pickingMode = PickingMode.Ignore };
+            emptyLabel.AddToClassList("event-debugger__empty");
+            body.Add(emptyLabel);
+
+            scrollToBottomAction = ScrollToBottomNow;
+            ResetRows();
+            root.schedule.Execute(Poll).Every(PollIntervalMilliseconds);
+        }
+
+        private Toolbar CreateToolbar()
+        {
+            Toolbar toolbar = new();
+            toolbar.Add(new ToolbarButton(OnClearClicked) { text = "Clear", tooltip = "Discard all recorded events." });
+
+            VisualElement spacer = new();
+            spacer.AddToClassList("event-debugger__spacer");
+            toolbar.Add(spacer);
+
+            busMenu = new ToolbarMenu { text = selectedBusName, tooltip = "Show events of one bus, or of all buses." };
+            busMenu.AddToClassList("event-debugger__bus-menu");
+            toolbar.Add(busMenu);
+            return toolbar;
+        }
+
+        private void SetRecorderActive(bool isActive)
+        {
+            if (isActive == isRecorderActive)
+            {
+                return;
+            }
+            isRecorderActive = isActive;
+            if (isActive)
+            {
+                EventBusDebugger.AddRecorder();
+            }
+            else
+            {
+                EventBusDebugger.RemoveRecorder();
+            }
+        }
+
+        private void OnClearClicked()
         {
             EventBusDebugger.Clear();
-            RebuildView();
+            ResetRows();
         }
 
-        private void OnDropdownValueChange(ChangeEvent<string> callback)
+        /// <summary>Cheap poll: does real work only when the trace changed since the last one.</summary>
+        private void Poll()
         {
-            // Resolve by index, not by label text: Unity renders menu shortcut notation
-            // (a trailing "#N" etc.) specially, so labels are not reliable identifiers.
-            int index = InstanceDropdownElement.index;
-            selectedBus = index > 0 && index - 1 < busBuffer.Count
-                ? busBuffer[index - 1].DisplayName
-                : AllBusesChoice;
-            RebuildView();
-        }
-
-        /// <summary>Cheap per-editor-frame poll: does real work only when the trace changed.</summary>
-        private void PollTrace()
-        {
-            if (EditorApplication.timeSinceStartup < nextPollTime)
+            int version = EventBusDebugger.Version;
+            if (version == lastVersion)
             {
                 return;
             }
-            nextPollTime = EditorApplication.timeSinceStartup + PollInterval;
-
-            int traceVersion = EventBusDebugger.Version;
-            if (traceVersion == lastVersion)
-            {
-                return;
-            }
-            lastVersion = traceVersion;
+            lastVersion = version;
 
             if (EventBusDebugger.ClearCount != lastClearCount)
             {
-                RebuildView();
+                ResetRows();
                 return;
             }
-            RefreshDropdownChoices();
+            RefreshBuses();
             AppendNewEntries();
         }
 
-        /// <summary>Discards all rows and rebuilds from the currently retained trace.</summary>
-        private void RebuildView()
+        /// <summary>Discards all rows and rebuilds from whatever the trace currently retains.</summary>
+        private void ResetRows()
         {
             lastClearCount = EventBusDebugger.ClearCount;
             lastSequence = -1;
-            currentBlock = null;
-            currentBlockChainId = -1;
-            totalRowCount = 0;
-            zebraEven = false;
-            EventContainerElement.Clear();
-            RefreshDropdownChoices();
-            AppendNewEntries();
-            // A fresh view (filter change, clear, window open) always starts at the newest events.
-            ScrollToBottomDeferred();
-        }
+            retainedEntries.Clear();
+            visibleEntries.Clear();
+            busNamesById.Clear();
+            RefreshBuses();
 
-        /// <summary>Keeps the dropdown choices aligned with <see cref="busBuffer"/>:
-        /// choice 0 is "All Buses", choice N is busBuffer[N - 1].</summary>
-        private void RefreshDropdownChoices()
-        {
-            EventBusDebugger.GetBuses(busBuffer);
-
-            List<string> choices = new(busBuffer.Count + 1) { AllBusesChoice };
-            string currentLabel = selectedBus;
-            foreach (EventBusDebugger.BusInfo info in busBuffer)
-            {
-                string label = info.IsDisposed ? info.DisplayName + DisposedSuffix : info.DisplayName;
-                choices.Add(label);
-                if (info.DisplayName == selectedBus)
-                {
-                    currentLabel = label;
-                }
-            }
-            InstanceDropdownElement.choices = choices;
-            InstanceDropdownElement.SetValueWithoutNotify(currentLabel);
+            lastSequence = EventBusDebugger.CopyEntriesSince(lastSequence, retainedEntries);
+            RebuildVisibleEntries(scrollToBottom: true);
         }
 
         private void AppendNewEntries()
         {
-            entryBuffer.Clear();
-            lastSequence = EventBusDebugger.CopyEntriesSince(lastSequence, entryBuffer);
-            if (entryBuffer.Count == 0)
+            pendingEntries.Clear();
+            lastSequence = EventBusDebugger.CopyEntriesSince(lastSequence, pendingEntries);
+            if (pendingEntries.Count == 0)
             {
                 return;
             }
 
-            int selectedBusId = ResolveSelectedBusId();
-            bool followBottom = IsNearBottom();
-            VisualElement container = EventContainerElement;
-
-            foreach (EventBusDebugger.TraceEntry entry in entryBuffer)
+            bool shouldFollow = IsScrolledToBottom();
+            retainedEntries.AddRange(pendingEntries);
+            if (retainedEntries.Count > MaxRows)
             {
-                if (selectedBusId != -1 && entry.BusId != selectedBusId)
+                retainedEntries.RemoveRange(0, retainedEntries.Count - MaxRows + TrimChunk);
+                RebuildVisibleEntries(shouldFollow);
+                return;
+            }
+
+            foreach (EventBusDebugger.TraceEntry entry in pendingEntries)
+            {
+                if (Matches(entry))
+                {
+                    visibleEntries.Add(entry);
+                }
+            }
+            listView.RefreshItems();
+            if (shouldFollow)
+            {
+                ScrollToBottom();
+            }
+            UpdateEmptyLabel();
+        }
+
+        private void RebuildVisibleEntries(bool scrollToBottom)
+        {
+            visibleEntries.Clear();
+            foreach (EventBusDebugger.TraceEntry entry in retainedEntries)
+            {
+                if (Matches(entry))
+                {
+                    visibleEntries.Add(entry);
+                }
+            }
+            listView.RefreshItems();
+            if (scrollToBottom)
+            {
+                ScrollToBottom();
+            }
+            UpdateEmptyLabel();
+        }
+
+        private bool Matches(in EventBusDebugger.TraceEntry entry)
+        {
+            return selectedBusName == AllBusesChoice
+                || (busNamesById.TryGetValue(entry.BusId, out string busName) && busName == selectedBusName);
+        }
+
+        private void BindRow(VisualElement element, int index)
+        {
+            EventBusDebugger.TraceEntry entry = visibleEntries[index];
+            bool isChainStart = index > 0 && visibleEntries[index - 1].ChainId != entry.ChainId;
+            ((TraceRow)element).Bind(entry, isChainStart);
+        }
+
+        /// <summary>Syncs bus names and the bus menu. Buses sharing a display name are listed, and filtered, as one.</summary>
+        private void RefreshBuses()
+        {
+            EventBusDebugger.GetBuses(buses);
+
+            bool isRenamed = false;
+            foreach (EventBusDebugger.BusInfo bus in buses)
+            {
+                if (busNamesById.TryGetValue(bus.Id, out string knownName) && knownName == bus.DisplayName)
                 {
                     continue;
                 }
+                isRenamed |= knownName != null;
+                busNamesById[bus.Id] = bus.DisplayName;
+            }
 
-                // A new chain starts a new block at the bottom; rows keep appending to the block
-                // of their chain so a chain reaction always reads downward in firing order.
-                if (currentBlock == null || entry.ChainId != currentBlockChainId)
+            if (UpdateBusMenuItems())
+            {
+                RebuildBusMenu();
+            }
+            if (isRenamed && selectedBusName != AllBusesChoice)
+            {
+                RebuildVisibleEntries(scrollToBottom: false);
+            }
+        }
+
+        /// <summary>Recomputes the distinct bus names; returns true when the menu needs rebuilding.</summary>
+        private bool UpdateBusMenuItems()
+        {
+            nextBusMenuItems.Clear();
+            foreach (EventBusDebugger.BusInfo bus in buses)
+            {
+                int index = IndexOfName(nextBusMenuItems, bus.DisplayName);
+                if (index < 0)
                 {
-                    currentBlock = new VisualElement();
-                    currentBlock.AddToClassList("event-block");
-                    currentBlockChainId = entry.ChainId;
-                    container.Add(currentBlock);
+                    nextBusMenuItems.Add((bus.DisplayName, bus.IsDisposed));
                 }
-
-                VisualElement row = CreateRow(entry);
-                row.AddToClassList(zebraEven ? "container-even" : "container-odd");
-                zebraEven = !zebraEven;
-                totalRowCount++;
-                currentBlock.Add(row);
+                else if (!bus.IsDisposed)
+                {
+                    // A name reads as disposed only while every bus carrying it is disposed.
+                    nextBusMenuItems[index] = (bus.DisplayName, false);
+                }
             }
 
-            TrimOldestBlocks(container);
-
-            if (followBottom)
+            bool isChanged = nextBusMenuItems.Count != busMenuItems.Count;
+            for (int i = 0; !isChanged && i < busMenuItems.Count; i++)
             {
-                ScrollToBottomDeferred();
+                isChanged = busMenuItems[i] != nextBusMenuItems[i];
+            }
+
+            if (isChanged)
+            {
+                busMenuItems.Clear();
+                busMenuItems.AddRange(nextBusMenuItems);
+            }
+            return isChanged;
+        }
+
+        private static int IndexOfName(List<(string Name, bool IsDisposed)> items, string name)
+        {
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i].Name == name)
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private void RebuildBusMenu()
+        {
+            DropdownMenu menu = busMenu.menu;
+            menu.MenuItems().Clear();
+            AppendBusAction(menu, AllBusesChoice, AllBusesChoice);
+            if (busMenuItems.Count > 0)
+            {
+                menu.AppendSeparator();
+            }
+            foreach ((string name, bool isDisposed) in busMenuItems)
+            {
+                AppendBusAction(menu, isDisposed ? name + DisposedSuffix : name, name);
+            }
+            busMenu.text = selectedBusName;
+        }
+
+        private void AppendBusAction(DropdownMenu menu, string label, string busName)
+        {
+            menu.AppendAction(
+                label,
+                _ => SelectBus(busName),
+                _ => busName == selectedBusName ? DropdownMenuAction.Status.Checked : DropdownMenuAction.Status.Normal);
+        }
+
+        private void SelectBus(string busName)
+        {
+            selectedBusName = busName;
+            busMenu.text = busName;
+            RebuildVisibleEntries(scrollToBottom: true);
+        }
+
+        private void UpdateEmptyLabel()
+        {
+            bool isEmpty = visibleEntries.Count == 0;
+            emptyLabel.style.display = isEmpty ? DisplayStyle.Flex : DisplayStyle.None;
+            if (isEmpty)
+            {
+                emptyLabel.text = retainedEntries.Count > 0
+                    ? "No events match the current filter."
+                    : "No events recorded yet.\nEvents published while this window is open appear here.";
             }
         }
 
-        /// <summary>Drops whole blocks from the top (the oldest chains) once over the row budget.
-        /// The newest block is always kept, however large.</summary>
-        private void TrimOldestBlocks(VisualElement container)
-        {
-            while (totalRowCount > MaxVisibleRows && container.childCount > 1)
-            {
-                VisualElement oldest = container[0];
-                totalRowCount -= oldest.childCount;
-                oldest.RemoveFromHierarchy();
-            }
-        }
-
-        /// <summary>True while the view should follow new events: no scrollable content yet, or
-        /// scrolled to within <see cref="StickToBottomSlack"/> of the bottom. Evaluated before rows
-        /// are appended, while the scroller still reflects a settled layout.</summary>
-        private bool IsNearBottom()
-        {
-            Scroller scroller = ScrollViewElement.verticalScroller;
-            return scroller.highValue <= 0 || scroller.value >= scroller.highValue - StickToBottomSlack;
-        }
-
-        private void ScrollToBottomDeferred()
-        {
-            // Scheduled items can run before the freshly added rows get a layout, in which case the
-            // scroller range still describes the old content. Snap on two consecutive ticks: the
-            // first covers the case where layout already ran, the second sees the settled range.
-            ScrollView scrollView = ScrollViewElement;
-            scrollView.schedule.Execute(() =>
-            {
-                SnapToBottom(scrollView);
-                scrollView.schedule.Execute(() => SnapToBottom(scrollView));
-            });
-        }
-
-        private static void SnapToBottom(ScrollView scrollView)
+        /// <summary>True while the view should follow new events: nothing to scroll yet, or within one row of the bottom.</summary>
+        private bool IsScrolledToBottom()
         {
             Scroller scroller = scrollView.verticalScroller;
-            // Never below zero: with always-visible scrollers and content shorter than the viewport,
-            // highValue is negative, and snapping to it would push the content downward.
-            scroller.value = Mathf.Max(0f, scroller.highValue);
+            float highValue = scroller.highValue;
+            return float.IsNaN(highValue) || highValue <= 0f || scroller.value >= highValue - RowHeight;
         }
 
-        /// <returns>-1 for all buses; <see cref="int.MinValue"/> when the selected bus is unknown,
-        /// which matches no entries until a bus with that name registers.</returns>
-        private int ResolveSelectedBusId()
+        private void ScrollToBottom()
         {
-            if (selectedBus == AllBusesChoice)
-            {
-                return -1;
-            }
-            foreach (EventBusDebugger.BusInfo info in busBuffer)
-            {
-                if (info.DisplayName == selectedBus)
-                {
-                    return info.Id;
-                }
-            }
-            return int.MinValue;
+            // Snap now and once more after the next layout pass, when the scroll range reflects the new rows.
+            ScrollToBottomNow();
+            listView.schedule.Execute(scrollToBottomAction);
         }
 
-        private VisualElement CreateRow(in EventBusDebugger.TraceEntry entry)
+        private void ScrollToBottomNow()
         {
-            string subjectName = entry.SubjectType != null ? entry.SubjectType.Name : "Unknown";
-            System.DateTime timestamp = new System.DateTime(entry.TimestampTicks, System.DateTimeKind.Utc).ToLocalTime();
-            return entry.Kind == EventBusDebugger.EntryKind.Publish
-                ? new Publisher(publisherAsset, subjectName, entry.EventType.Name, entry.Depth, timestamp)
-                : new Listener(listenerAsset, subjectName, entry.EventType.Name, entry.Depth, timestamp);
+            if (visibleEntries.Count > 0)
+            {
+                listView.ScrollToItem(-1);
+            }
+        }
+
+        private static T LoadAsset<T>(string guid) where T : Object
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            return string.IsNullOrEmpty(path) ? null : AssetDatabase.LoadAssetAtPath<T>(path);
         }
     }
 }
