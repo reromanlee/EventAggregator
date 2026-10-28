@@ -74,7 +74,7 @@ namespace reromanlee.EventAggregator.Editor
             get => eventDebuggerElement.Q<ScrollView>();
         }
 
-        [MenuItem("Tools/Event Debugger")]
+        [MenuItem("Window/Analysis/Event Debugger")]
         public static void ShowWindow()
         {
             EventDebugger window = GetWindow<EventDebugger>();
