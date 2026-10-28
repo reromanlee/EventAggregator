@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using NUnit.Framework;
 
 namespace reromanlee.EventAggregator.Editor.Tests
@@ -111,6 +113,27 @@ namespace reromanlee.EventAggregator.Editor.Tests
         }
 
         [Test]
+        public void CollectedBuses_AreForgottenWithoutDispose()
+        {
+            int[] busIds = RegisterAbandonedBuses(50);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            int remaining = 0;
+            foreach (int busId in busIds)
+            {
+                if (GetBus(busId).HasValue)
+                {
+                    remaining++;
+                }
+            }
+
+            // Conservative stack scanning may keep a few instances alive; most must be gone.
+            Assert.That(remaining, Is.LessThan(busIds.Length / 2));
+        }
+
+        [Test]
         public void SetDebugName_WithWhitespace_RestoresDefaultName()
         {
             using EventBus bus = new();
@@ -165,6 +188,17 @@ namespace reromanlee.EventAggregator.Editor.Tests
             Assert.That(entry.EventType, Is.EqualTo(eventType));
             Assert.That(entry.SubjectType, Is.EqualTo(subjectType));
             Assert.That(entry.Depth, Is.EqualTo(depth));
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int[] RegisterAbandonedBuses(int count)
+        {
+            int[] busIds = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                busIds[i] = FindBusId(new EventBus(), $"Abandoned {i}");
+            }
+            return busIds;
         }
 
         private static int FindBusId(EventBus bus, string uniqueName)

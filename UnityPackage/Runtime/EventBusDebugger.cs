@@ -91,7 +91,12 @@ namespace reromanlee.EventAggregator
             public bool IsDisposed;
             public int EntryCount;
 
+            // Weak, so the debugger never keeps a bus alive and can forget buses collected without Dispose.
+            public WeakReference<EventBus> Bus;
+
             public string DisplayName => CustomName ?? DefaultName;
+
+            public bool IsGone => IsDisposed || !Bus.TryGetTarget(out _);
         }
 
         /// <summary>Trace entries retained; the oldest are overwritten once full, so memory stays bounded.</summary>
@@ -153,14 +158,14 @@ namespace reromanlee.EventAggregator
         }
 
         /// <summary>Registers a new bus and returns its debugger id.</summary>
-        internal static int Register()
+        internal static int Register(EventBus bus)
         {
             lock (gate)
             {
                 int id = ++nextBusId;
 
                 // No '#' in the default name: editor menus parse a trailing "#N" as a Shift+N shortcut.
-                BusRecord record = new() { Id = id, DefaultName = $"EventBus {id}" };
+                BusRecord record = new() { Id = id, DefaultName = $"EventBus {id}", Bus = new WeakReference<EventBus>(bus) };
                 buses.Add(record);
                 busesById.Add(id, record);
                 version++;
@@ -195,15 +200,22 @@ namespace reromanlee.EventAggregator
             }
         }
 
-        /// <summary>Fills <paramref name="target"/> with the known buses in creation order.</summary>
+        /// <summary>
+        /// Fills <paramref name="target"/> with the known buses in creation order. Buses collected without being
+        /// disposed are reported as disposed while their entries remain, and forgotten afterwards.
+        /// </summary>
         internal static void GetBuses(List<BusInfo> target)
         {
             target.Clear();
             lock (gate)
             {
+                for (int i = buses.Count - 1; i >= 0; i--)
+                {
+                    PruneIfUnreferenced(buses[i]);
+                }
                 foreach (BusRecord record in buses)
                 {
-                    target.Add(new BusInfo(record.Id, record.DisplayName, record.IsDisposed));
+                    target.Add(new BusInfo(record.Id, record.DisplayName, record.IsGone));
                 }
             }
         }
@@ -310,10 +322,10 @@ namespace reromanlee.EventAggregator
             }
         }
 
-        /// <summary>Forgets a disposed bus once no retained entry refers to it. Must be called under the gate.</summary>
+        /// <summary>Forgets a disposed or collected bus once no retained entry refers to it. Must be called under the gate.</summary>
         private static void PruneIfUnreferenced(BusRecord record)
         {
-            if (record.IsDisposed && record.EntryCount <= 0)
+            if (record.EntryCount <= 0 && record.IsGone)
             {
                 buses.Remove(record);
                 busesById.Remove(record.Id);

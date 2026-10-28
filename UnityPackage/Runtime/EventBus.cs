@@ -69,7 +69,7 @@ namespace reromanlee.EventAggregator
         public EventBus()
         {
 #if UNITY_EDITOR
-            debugId = EventBusDebugger.Register();
+            debugId = EventBusDebugger.Register(this);
 #endif
         }
 
