@@ -25,10 +25,10 @@ namespace reromanlee.EventAggregator
     /// for event A publishing B whose handler publishes A again, forever) is reported as an error and the rest
     /// of that event chain is cancelled, instead of crashing with an undebuggable stack overflow or freezing on
     /// fan-out. The check is compiled out of release builds entirely.</para>
-    /// <para><b>Debugging.</b> In the editor, every bus reports its publishes and deliveries to the
-    /// Event Debugger window, where instances appear as "EventBus N" or the name given via
-    /// <see cref="SetDebugName"/>. All of this instrumentation — including calls to
-    /// <see cref="SetDebugName"/> — is compiled out of player builds and costs nothing there.</para>
+    /// <para><b>Debugging.</b> While the Event Debugger window (Window ▸ Analysis ▸ Event Debugger) is open, every
+    /// bus reports its publishes and deliveries to it, where instances appear as "EventBus N" or the name given
+    /// via <see cref="SetDebugName"/>. With the window closed this costs one flag check per publish, and player
+    /// builds contain none of this instrumentation.</para>
     /// </remarks>
     public sealed class EventBus : IEventBus, IDisposable
     {
@@ -58,13 +58,13 @@ namespace reromanlee.EventAggregator
         private bool hasWarnedPublishAfterDispose;
 
 #if UNITY_EDITOR
-        // Identifies this instance in the editor-only Event Debugger window.
+        // Identifies this instance in the Event Debugger window.
         private readonly int debugId;
 #endif
 
         /// <summary>
-        /// Creates an empty bus. In the editor, the instance registers itself with the
-        /// Event Debugger window; player builds skip registration entirely.
+        /// Creates an empty bus. In the editor, the instance registers itself with the Event Debugger window;
+        /// player builds skip registration entirely.
         /// </summary>
         public EventBus()
         {
@@ -74,13 +74,11 @@ namespace reromanlee.EventAggregator
         }
 
         /// <summary>
-        /// Names this bus in the editor's Event Debugger window in place of the default
-        /// "EventBus N". Editor-only: calls to this method are stripped from player builds by the
-        /// compiler, so it can be called unconditionally from runtime code at zero build cost.
+        /// Names this bus in the Event Debugger window in place of the default "EventBus N". Editor-only: calls
+        /// to this method are stripped from player builds by the compiler, arguments included.
         /// </summary>
-        /// <param name="name">The display name shown in the debugger window. Avoid ending it with
-        /// Unity menu shortcut notation ('#', '%', '&amp;' or '_' followed by a character), which
-        /// editor dropdowns would render as a keyboard shortcut instead of text.</param>
+        /// <param name="name">The display name; null or whitespace restores the default. Buses sharing a name are
+        /// filtered together, and a '/' groups names into submenus of the bus filter.</param>
         [Conditional("UNITY_EDITOR")]
         public void SetDebugName(string name)
         {
@@ -111,9 +109,11 @@ namespace reromanlee.EventAggregator
 #endif
 
 #if UNITY_EDITOR
-            // Editor-only trace for the Event Debugger window. Recorded before the subscriber
-            // checks so that events nobody listens to still show up as "fired, went nowhere".
-            EventBusDebugger.OnPublish(debugId, typeof(TEvent), depth);
+            bool isRecording = EventBusDebugger.IsRecording;
+            if (isRecording)
+            {
+                EventBusDebugger.RecordPublish(debugId, typeof(TEvent), depth);
+            }
 #endif
 
             // No subscribers for this event type (yet) is a normal situation, not an error: the listening
@@ -156,14 +156,13 @@ namespace reromanlee.EventAggregator
                     }
 
 #if UNITY_EDITOR
-                    // Record the delivery one level deeper than its publish, and mark this listener
-                    // as the executing handler so any events it publishes are attributed to it.
-                    string listenerName = subscription.Listener.GetType().Name;
-                    EventBusDebugger.OnDelivery(debugId, typeof(TEvent), listenerName, publishDepth);
-                    string previousHandler = EventBusDebugger.BeginHandler(listenerName);
-                    try
+                    if (isRecording)
                     {
+                        DeliverRecorded(subscription, eventData, depth + 1);
+                        continue;
+                    }
 #endif
+
                     try
                     {
                         subscription.Listener.Handle(eventData);
@@ -172,13 +171,6 @@ namespace reromanlee.EventAggregator
                     {
                         ReportListenerException(subscription, exception);
                     }
-#if UNITY_EDITOR
-                    }
-                    finally
-                    {
-                        EventBusDebugger.EndHandler(previousHandler);
-                    }
-#endif
                 }
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
@@ -394,6 +386,29 @@ namespace reromanlee.EventAggregator
                 $"Publish depth exceeded {MaxPublishDepth} while publishing '{typeof(TEvent).Name}': listeners are most likely " +
                 "publishing events that recursively trigger each other. The rest of this event chain was cancelled. " +
                 "This check exists only in the editor and development builds; a release build would overflow the stack.");
+        }
+#endif
+
+#if UNITY_EDITOR
+        private void DeliverRecorded<TEvent>(Subscription<TEvent> subscription, TEvent eventData, int depth)
+        {
+            Type listenerType = subscription.Listener.GetType();
+            EventBusDebugger.RecordDelivery(debugId, typeof(TEvent), listenerType, depth);
+
+            // Marks this listener as the executing handler so events it publishes are attributed to it.
+            Type previousHandler = EventBusDebugger.BeginHandler(listenerType);
+            try
+            {
+                subscription.Listener.Handle(eventData);
+            }
+            catch (Exception exception)
+            {
+                ReportListenerException(subscription, exception);
+            }
+            finally
+            {
+                EventBusDebugger.EndHandler(previousHandler);
+            }
         }
 #endif
     }

@@ -102,10 +102,12 @@ namespace reromanlee.EventAggregator.Editor
 
             RebuildView();
             EditorApplication.update += PollTrace;
+            EventBusDebugger.AddRecorder();
         }
 
         private void OnDisable()
         {
+            EventBusDebugger.RemoveRecorder();
             EditorApplication.update -= PollTrace;
         }
 
@@ -295,9 +297,11 @@ namespace reromanlee.EventAggregator.Editor
 
         private VisualElement CreateRow(in EventBusDebugger.TraceEntry entry)
         {
+            string subjectName = entry.SubjectType != null ? entry.SubjectType.Name : "Unknown";
+            System.DateTime timestamp = new System.DateTime(entry.TimestampTicks, System.DateTimeKind.Utc).ToLocalTime();
             return entry.Kind == EventBusDebugger.EntryKind.Publish
-                ? new Publisher(publisherAsset, entry.SourceName, entry.EventName, entry.Depth, entry.Timestamp)
-                : new Listener(listenerAsset, entry.TargetName, entry.EventName, entry.Depth, entry.Timestamp);
+                ? new Publisher(publisherAsset, subjectName, entry.EventType.Name, entry.Depth, timestamp)
+                : new Listener(listenerAsset, subjectName, entry.EventType.Name, entry.Depth, timestamp);
         }
     }
 }

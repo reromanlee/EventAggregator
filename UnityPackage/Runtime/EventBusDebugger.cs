@@ -7,68 +7,72 @@ using System.Threading;
 namespace reromanlee.EventAggregator
 {
     /// <summary>
-    /// Editor-only trace hub behind the Event Debugger window (Tools ▸ Event Debugger).
-    /// Every <see cref="EventBus"/> registers itself here, and the publish path reports each
-    /// publish and each delivery so the window can show what fired and where it went.
+    /// Editor-only trace hub behind the Event Debugger window. Every <see cref="EventBus"/> registers here, and
+    /// while at least one recorder (an open, recording window) is active, the publish path reports each publish
+    /// and each delivery so the window can show what fired and where it went.
     /// </summary>
     /// <remarks>
-    /// This entire type — and every call into it — is compiled only in the editor, so player
-    /// builds (including development builds) carry none of this code and none of its cost.
-    /// All members are thread-safe; publishes may be reported from any thread.
+    /// This type, and every call into it, is compiled only in the editor. With no recorder active the publish
+    /// path pays a single flag check. All members are thread-safe; publishes may be reported from any thread.
     /// </remarks>
     internal static class EventBusDebugger
     {
         internal enum EntryKind : byte
         {
-            /// <summary>Someone called Publish: SourceName fired EventName.</summary>
+            /// <summary>Someone called Publish: the subject fired the event.</summary>
             Publish,
-            /// <summary>One listener received the event: EventName went to TargetName.</summary>
+
+            /// <summary>One listener received the event: the event went to the subject.</summary>
             Delivery,
         }
 
-        /// <summary>One immutable row of the trace.</summary>
+        /// <summary>One immutable row of the trace. Stores types, not names, so recording never formats strings.</summary>
         internal readonly struct TraceEntry
         {
-            /// <summary>Monotonically increasing id; never reset, so consumers can poll incrementally.</summary>
+            /// <summary>Monotonically increasing and contiguous; never reset, so consumers can poll incrementally.</summary>
             public readonly long Sequence;
-            public readonly int BusId;
-            /// <summary>Groups a root publish with every entry it caused (deliveries and chained
-            /// publishes, across buses). Lets consumers render whole chain reactions as one unit.</summary>
-            public readonly long ChainId;
-            public readonly EntryKind Kind;
-            /// <summary>Chain depth: 0 for a root publish, +1 for every level of events firing events.
-            /// Deliveries are recorded one deeper than the publish that produced them.</summary>
-            public readonly int Depth;
-            public readonly string EventName;
-            /// <summary>Who published — a listener type name for chained events, the caller's type name
-            /// (resolved from the stack) for root publishes. Null for <see cref="EntryKind.Delivery"/>.</summary>
-            public readonly string SourceName;
-            /// <summary>The receiving listener's type name. Null for <see cref="EntryKind.Publish"/>.</summary>
-            public readonly string TargetName;
-            /// <summary>Local wall-clock time when the entry was recorded (i.e. when the publish happened).</summary>
-            public readonly DateTime Timestamp;
 
-            public TraceEntry(long sequence, int busId, long chainId, EntryKind kind, int depth, string eventName, string sourceName, string targetName, DateTime timestamp)
+            /// <summary>Groups a root publish with every entry it caused, across buses.</summary>
+            public readonly long ChainId;
+
+            /// <summary>UTC ticks of when the entry was recorded.</summary>
+            public readonly long TimestampTicks;
+
+            public readonly Type EventType;
+
+            /// <summary>The publisher for <see cref="EntryKind.Publish"/> (null when unknown), the receiving listener
+            /// for <see cref="EntryKind.Delivery"/>.</summary>
+            public readonly Type SubjectType;
+
+            public readonly int BusId;
+
+            /// <summary>Chain depth: 0 for a root publish, +1 per level of events firing events. Deliveries are one
+            /// deeper than the publish that produced them.</summary>
+            public readonly int Depth;
+
+            public readonly EntryKind Kind;
+
+            public TraceEntry(long sequence, long chainId, long timestampTicks, Type eventType, Type subjectType, int busId, int depth, EntryKind kind)
             {
                 Sequence = sequence;
-                BusId = busId;
                 ChainId = chainId;
-                Kind = kind;
+                TimestampTicks = timestampTicks;
+                EventType = eventType;
+                SubjectType = subjectType;
+                BusId = busId;
                 Depth = depth;
-                EventName = eventName;
-                SourceName = sourceName;
-                TargetName = targetName;
-                Timestamp = timestamp;
+                Kind = kind;
             }
         }
 
-        /// <summary>A bus known to the debugger. Records are kept after disposal so the trace history stays attributable.</summary>
+        /// <summary>A bus known to the debugger, as shown in the window's bus filter.</summary>
         internal readonly struct BusInfo
         {
             public readonly int Id;
-            /// <summary>Base display name without any status decoration: the custom name set via
-            /// <see cref="EventBus.SetDebugName"/>, or "EventBus #id".</summary>
+
+            /// <summary>The name set via <see cref="EventBus.SetDebugName"/>, or "EventBus N".</summary>
             public readonly string DisplayName;
+
             public readonly bool IsDisposed;
 
             public BusInfo(int id, string displayName, bool isDisposed)
@@ -82,79 +86,116 @@ namespace reromanlee.EventAggregator
         private sealed class BusRecord
         {
             public int Id;
+            public string DefaultName;
             public string CustomName;
-            public bool Disposed;
+            public bool IsDisposed;
+            public int EntryCount;
+
+            public string DisplayName => CustomName ?? DefaultName;
         }
 
-        // Bounded so a publish-heavy play session cannot grow editor memory without limit.
-        private const int MaxEntries = 2000;
-        private const int TrimChunk = 500;
+        /// <summary>Trace entries retained; the oldest are overwritten once full, so memory stays bounded.</summary>
+        internal const int Capacity = 10000;
 
         private static readonly object gate = new();
-        private static readonly List<TraceEntry> entries = new();
+
+        // Creation order for the filter, plus id lookup for the per-entry bookkeeping.
         private static readonly List<BusRecord> buses = new();
+        private static readonly Dictionary<int, BusRecord> busesById = new();
+
+        // Ring buffer, allocated on first record so sessions that never open the window pay nothing.
+        private static TraceEntry[] entries;
+        private static int oldestIndex;
+        private static int entryCount;
+
         private static long nextSequence;
+        private static long nextChain;
         private static int nextBusId;
         private static int version;
         private static int clearCount;
+        private static int recorderCount;
 
-        // The type name of the listener whose Handle is currently executing on this thread.
-        // Lets chained publishes attribute themselves to the listener that fired them.
-        [ThreadStatic] private static string currentHandler;
+        // The listener whose Handle is executing on this thread, so chained publishes can name their publisher.
+        [ThreadStatic] private static Type currentHandler;
 
-        // The chain a publish on this thread belongs to; a new id is minted at every root publish
-        // and inherited by everything that publish causes, even across bus instances.
+        // The chain the current publish on this thread belongs to; minted at every root publish.
         [ThreadStatic] private static long currentChain;
-        private static long nextChain;
 
-        /// <summary>Bumped on every mutation (entry, registration, rename, clear). Poll this cheaply
-        /// and only copy entries when it changed.</summary>
+        /// <summary>True while at least one recorder is active. Checked by every publish in the editor.</summary>
+        internal static bool IsRecording => Volatile.Read(ref recorderCount) > 0;
+
+        /// <summary>Bumped on every change (entry, registration, rename, disposal, clear). Poll it cheaply and copy
+        /// entries only when it changed.</summary>
         internal static int Version => Volatile.Read(ref version);
 
         /// <summary>Bumped by <see cref="Clear"/> so consumers know to discard rows they already built.</summary>
         internal static int ClearCount => Volatile.Read(ref clearCount);
+
+        /// <summary>Starts recording for one consumer. Pair every call with <see cref="RemoveRecorder"/>.</summary>
+        internal static void AddRecorder()
+        {
+            Interlocked.Increment(ref recorderCount);
+        }
+
+        /// <summary>Stops recording for one consumer. Never drops below zero, so unbalanced calls are harmless.</summary>
+        internal static void RemoveRecorder()
+        {
+            int current;
+            do
+            {
+                current = Volatile.Read(ref recorderCount);
+                if (current == 0)
+                {
+                    return;
+                }
+            }
+            while (Interlocked.CompareExchange(ref recorderCount, current - 1, current) != current);
+        }
 
         /// <summary>Registers a new bus and returns its debugger id.</summary>
         internal static int Register()
         {
             lock (gate)
             {
-                BusRecord record = new() { Id = ++nextBusId };
+                int id = ++nextBusId;
+
+                // No '#' in the default name: editor menus parse a trailing "#N" as a Shift+N shortcut.
+                BusRecord record = new() { Id = id, DefaultName = $"EventBus {id}" };
                 buses.Add(record);
+                busesById.Add(id, record);
                 version++;
-                return record.Id;
+                return id;
             }
         }
 
-        /// <summary>Marks a bus disposed. Its record and trace entries remain visible.</summary>
+        /// <summary>Marks a bus disposed. It stays listed while trace entries still reference it.</summary>
         internal static void Unregister(int busId)
         {
             lock (gate)
             {
-                BusRecord record = Find(busId);
-                if (record != null && !record.Disposed)
+                if (busesById.TryGetValue(busId, out BusRecord record) && !record.IsDisposed)
                 {
-                    record.Disposed = true;
+                    record.IsDisposed = true;
+                    PruneIfUnreferenced(record);
                     version++;
                 }
             }
         }
 
-        /// <summary>Gives a bus a human-readable name in place of the default "EventBus #id".</summary>
+        /// <summary>Gives a bus a custom display name; null or whitespace restores the default.</summary>
         internal static void SetBusName(int busId, string name)
         {
             lock (gate)
             {
-                BusRecord record = Find(busId);
-                if (record != null)
+                if (busesById.TryGetValue(busId, out BusRecord record))
                 {
-                    record.CustomName = name;
+                    record.CustomName = string.IsNullOrWhiteSpace(name) ? null : name.Trim();
                     version++;
                 }
             }
         }
 
-        /// <summary>Fills <paramref name="target"/> with all known buses, in creation order.</summary>
+        /// <summary>Fills <paramref name="target"/> with the known buses in creation order.</summary>
         internal static void GetBuses(List<BusInfo> target)
         {
             target.Clear();
@@ -162,114 +203,133 @@ namespace reromanlee.EventAggregator
             {
                 foreach (BusRecord record in buses)
                 {
-                    // No '#' in the default name: Unity menus parse a trailing "#N" as a
-                    // Shift+N keyboard shortcut, which would mangle the dropdown label.
-                    target.Add(new BusInfo(record.Id, record.CustomName ?? $"EventBus {record.Id}", record.Disposed));
+                    target.Add(new BusInfo(record.Id, record.DisplayName, record.IsDisposed));
                 }
             }
         }
 
-        /// <summary>Records a publish. The publisher is the listener currently handling an event on
-        /// this thread (chained publish), or resolved from the call stack for root publishes.</summary>
-        internal static void OnPublish(int busId, Type eventType, int depth)
+        /// <summary>Records a publish. The publisher is the listener currently handling an event on this thread
+        /// (a chained publish), or is resolved from the call stack for root publishes.</summary>
+        internal static void RecordPublish(int busId, Type eventType, int depth)
         {
             if (depth == 0)
             {
                 currentChain = Interlocked.Increment(ref nextChain);
             }
-            string publisher = currentHandler ?? ResolveExternalPublisher();
-            Append(busId, currentChain, EntryKind.Publish, depth, eventType.Name, publisher, null);
+            Type publisher = currentHandler ?? ResolveExternalPublisher();
+            Append(busId, EntryKind.Publish, depth, eventType, publisher);
         }
 
         /// <summary>Records one event reaching one listener.</summary>
-        internal static void OnDelivery(int busId, Type eventType, string listenerName, int depth)
+        internal static void RecordDelivery(int busId, Type eventType, Type listenerType, int depth)
         {
-            Append(busId, currentChain, EntryKind.Delivery, depth, eventType.Name, null, listenerName);
+            Append(busId, EntryKind.Delivery, depth, eventType, listenerType);
         }
 
-        /// <summary>Marks <paramref name="listenerName"/> as the executing handler on this thread and
-        /// returns the previous value, which must be restored via <see cref="EndHandler"/>.</summary>
-        internal static string BeginHandler(string listenerName)
+        /// <summary>Marks <paramref name="listenerType"/> as the executing handler on this thread and returns the
+        /// previous one, which must be restored via <see cref="EndHandler"/>.</summary>
+        internal static Type BeginHandler(Type listenerType)
         {
-            string previous = currentHandler;
-            currentHandler = listenerName;
+            Type previous = currentHandler;
+            currentHandler = listenerType;
             return previous;
         }
 
-        internal static void EndHandler(string previous)
+        internal static void EndHandler(Type previous)
         {
             currentHandler = previous;
         }
 
-        /// <summary>Discards all trace entries. Known buses stay registered.</summary>
+        /// <summary>Discards all trace entries and forgets disposed buses. Live buses stay registered.</summary>
         internal static void Clear()
         {
             lock (gate)
             {
-                entries.Clear();
+                oldestIndex = 0;
+                entryCount = 0;
+                for (int i = buses.Count - 1; i >= 0; i--)
+                {
+                    BusRecord record = buses[i];
+                    record.EntryCount = 0;
+                    PruneIfUnreferenced(record);
+                }
                 clearCount++;
                 version++;
             }
         }
 
         /// <summary>
-        /// Appends every entry newer than <paramref name="sinceSequence"/> to <paramref name="target"/>
-        /// and returns the newest sequence seen (or <paramref name="sinceSequence"/> when none).
-        /// Pass -1 to copy everything currently retained.
+        /// Appends every retained entry newer than <paramref name="sinceSequence"/> to <paramref name="target"/>, oldest
+        /// first, and returns the newest sequence seen. Pass -1 to copy everything retained.
         /// </summary>
         internal static long CopyEntriesSince(long sinceSequence, List<TraceEntry> target)
         {
             lock (gate)
             {
-                int start = entries.Count;
-                while (start > 0 && entries[start - 1].Sequence > sinceSequence)
+                if (entryCount == 0)
                 {
-                    start--;
+                    return sinceSequence;
                 }
-                for (int i = start; i < entries.Count; i++)
+
+                long oldestSequence = entries[oldestIndex].Sequence;
+                long newestSequence = oldestSequence + entryCount - 1;
+                long firstSequence = Math.Max(sinceSequence + 1, oldestSequence);
+                for (long sequence = firstSequence; sequence <= newestSequence; sequence++)
                 {
-                    target.Add(entries[i]);
+                    target.Add(entries[(oldestIndex + (int)(sequence - oldestSequence)) % Capacity]);
                 }
-                return entries.Count > 0 ? entries[entries.Count - 1].Sequence : sinceSequence;
+                return Math.Max(sinceSequence, newestSequence);
             }
         }
 
-        private static BusRecord Find(int busId)
+        private static void Append(int busId, EntryKind kind, int depth, Type eventType, Type subjectType)
         {
-            foreach (BusRecord record in buses)
-            {
-                if (record.Id == busId)
-                {
-                    return record;
-                }
-            }
-            return null;
-        }
-
-        private static void Append(int busId, long chainId, EntryKind kind, int depth, string eventName, string sourceName, string targetName)
-        {
+            long timestampTicks = DateTime.UtcNow.Ticks;
             lock (gate)
             {
-                if (entries.Count >= MaxEntries)
+                entries ??= new TraceEntry[Capacity];
+                if (entryCount == Capacity)
                 {
-                    entries.RemoveRange(0, TrimChunk);
+                    if (busesById.TryGetValue(entries[oldestIndex].BusId, out BusRecord evicted))
+                    {
+                        evicted.EntryCount--;
+                        PruneIfUnreferenced(evicted);
+                    }
+                    oldestIndex = (oldestIndex + 1) % Capacity;
+                    entryCount--;
                 }
-                entries.Add(new TraceEntry(nextSequence++, busId, chainId, kind, depth, eventName, sourceName, targetName, DateTime.Now));
+
+                entries[(oldestIndex + entryCount) % Capacity] =
+                    new TraceEntry(nextSequence++, currentChain, timestampTicks, eventType, subjectType, busId, depth, kind);
+                entryCount++;
+                if (busesById.TryGetValue(busId, out BusRecord record))
+                {
+                    record.EntryCount++;
+                }
                 version++;
             }
         }
 
+        /// <summary>Forgets a disposed bus once no retained entry refers to it. Must be called under the gate.</summary>
+        private static void PruneIfUnreferenced(BusRecord record)
+        {
+            if (record.IsDisposed && record.EntryCount <= 0)
+            {
+                buses.Remove(record);
+                busesById.Remove(record.Id);
+            }
+        }
+
         /// <summary>
-        /// Resolves the type that called Publish by walking the stack past this package's frames.
-        /// Compiler-generated types (async state machines, lambda display classes) are unwrapped to
-        /// the user type that declares them.
+        /// Resolves the type that called Publish by walking the stack past this package's frames. Compiler-generated
+        /// types (async state machines, lambda closures) are unwrapped to the user type that declares them.
         /// </summary>
-        private static string ResolveExternalPublisher()
+        private static Type ResolveExternalPublisher()
         {
             StackTrace stackTrace = new(2, false);
             for (int i = 0; i < stackTrace.FrameCount; i++)
             {
-                Type type = stackTrace.GetFrame(i).GetMethod()?.DeclaringType;
+                Type type = stackTrace.GetFrame(i)?.GetMethod()?.DeclaringType;
                 if (type == null || type.Assembly == typeof(EventBusDebugger).Assembly)
                 {
                     continue;
@@ -278,9 +338,9 @@ namespace reromanlee.EventAggregator
                 {
                     type = type.DeclaringType;
                 }
-                return type.Name;
+                return type;
             }
-            return "Unknown";
+            return null;
         }
     }
 }
