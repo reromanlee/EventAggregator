@@ -20,10 +20,10 @@ namespace reromanlee.EventAggregator
     /// <para><b>Lifetime.</b> The bus holds strong references to listeners, so teardown code should always
     /// unsubscribe. A listener that is a destroyed Unity object is skipped and unsubscribed automatically, with
     /// a warning in the editor and development builds. Unsubscribing after the bus was disposed is a harmless no-op.</para>
-    /// <para><b>Recursion.</b> In the editor and development builds, runaway recursive publishing
-    /// (a handler for event A publishing B whose handler publishes A again, forever) is detected and
-    /// reported as an error instead of crashing the player with an undebuggable stack overflow.
-    /// The check is compiled out of release builds entirely.</para>
+    /// <para><b>Recursion.</b> In the editor and development builds, runaway recursive publishing (a handler
+    /// for event A publishing B whose handler publishes A again, forever) is reported as an error and the rest
+    /// of that event chain is cancelled, instead of crashing with an undebuggable stack overflow or freezing on
+    /// fan-out. The check is compiled out of release builds entirely.</para>
     /// <para><b>Debugging.</b> In the editor, every bus reports its publishes and deliveries to the
     /// Event Debugger window, where instances appear as "EventBus N" or the name given via
     /// <see cref="SetDebugName"/>. All of this instrumentation — including calls to
@@ -33,13 +33,16 @@ namespace reromanlee.EventAggregator
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         /// <summary>
-        /// Nested publishes deeper than this are treated as an infinite publish loop. The counter is
-        /// per thread and shared by all bus instances; the limit is generous enough that legitimate
-        /// event chains never trip it.
+        /// Nested publishes deeper than this are treated as an infinite publish loop. The counter is per thread
+        /// and shared by all bus instances; the limit is generous enough that legitimate chains never reach it.
         /// </summary>
         private const int MaxPublishDepth = 64;
 
         [ThreadStatic] private static int publishDepth;
+
+        // Set once a runaway chain is reported; every remaining publish of that chain on this thread is then
+        // skipped so the stack unwinds in linear time instead of exploring each fan-out branch to the limit.
+        [ThreadStatic] private static bool isRunawayChainCancelled;
 #endif
 
         // Listener groups indexed by EventTypeIndex<TEvent>.Value. Publish reads lock-free; Subscribe fills an
@@ -93,10 +96,18 @@ namespace reromanlee.EventAggregator
                 throw new ObjectDisposedException(nameof(EventBus));
             }
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            int depth = publishDepth;
+            if (depth > 0 && isRunawayChainCancelled)
+            {
+                return;
+            }
+#endif
+
 #if UNITY_EDITOR
             // Editor-only trace for the Event Debugger window. Recorded before the subscriber
             // checks so that events nobody listens to still show up as "fired, went nowhere".
-            EventBusDebugger.OnPublish(debugId, typeof(TEvent), publishDepth);
+            EventBusDebugger.OnPublish(debugId, typeof(TEvent), depth);
 #endif
 
             // No subscribers for this event type (yet) is a normal situation, not an error: the listening
@@ -114,13 +125,13 @@ namespace reromanlee.EventAggregator
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            if (++publishDepth > MaxPublishDepth)
+            if (depth >= MaxPublishDepth)
             {
-                publishDepth--;
-                throw new InvalidOperationException(
-                    $"Publish depth exceeded {MaxPublishDepth} while publishing '{typeof(TEvent).Name}'. " +
-                    "Listeners are most likely publishing events that recursively trigger each other.");
+                CancelRunawayChain<TEvent>();
+                return;
             }
+
+            publishDepth = depth + 1;
             try
             {
 #endif
@@ -168,7 +179,11 @@ namespace reromanlee.EventAggregator
             }
             finally
             {
-                publishDepth--;
+                publishDepth = depth;
+                if (depth == 0)
+                {
+                    isRunawayChainCancelled = false;
+                }
             }
 #endif
         }
@@ -316,5 +331,16 @@ namespace reromanlee.EventAggregator
                 $"Listener '{subscription.Listener.GetType().Name}' was destroyed while still subscribed to '{typeof(TEvent).Name}' " +
                 "and has been unsubscribed automatically. Unsubscribe in OnDisable or OnDestroy to release it deterministically.");
         }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private static void CancelRunawayChain<TEvent>()
+        {
+            isRunawayChainCancelled = true;
+            Debug.LogError(
+                $"Publish depth exceeded {MaxPublishDepth} while publishing '{typeof(TEvent).Name}': listeners are most likely " +
+                "publishing events that recursively trigger each other. The rest of this event chain was cancelled. " +
+                "This check exists only in the editor and development builds; a release build would overflow the stack.");
+        }
+#endif
     }
 }
