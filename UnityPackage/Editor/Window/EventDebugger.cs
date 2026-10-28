@@ -10,7 +10,8 @@ namespace reromanlee.EventAggregator.Editor
     /// Live view of every <see cref="EventBus"/> in the session: which events fired, who published them, which
     /// listeners received them, and how deep each chain reaction went. Rows are virtualized, so only the visible
     /// ones exist however long the trace grows. The view follows new events unless scrolled up, and resumes
-    /// following once scrolled back to the bottom. Buses report to it only while the window is open.
+    /// following once scrolled back to the bottom. Buses report to it only while the window is open and
+    /// recording, so a closed or paused window costs the publish path a single flag check.
     /// </summary>
     internal sealed class EventDebugger : EditorWindow
     {
@@ -31,6 +32,9 @@ namespace reromanlee.EventAggregator.Editor
 
         // Serialized so the window keeps its setup across domain reloads and editor restarts.
         [SerializeField] private string selectedBusName = AllBusesChoice;
+        [SerializeField] private string searchText = string.Empty;
+        [SerializeField] private bool isRecordingEnabled = true;
+        [SerializeField] private bool clearOnPlay = true;
 
         private readonly List<EventBusDebugger.TraceEntry> retainedEntries = new();
         private readonly List<EventBusDebugger.TraceEntry> visibleEntries = new();
@@ -64,11 +68,13 @@ namespace reromanlee.EventAggregator.Editor
             Texture2D icon = LoadAsset<Texture2D>(EditorGUIUtility.isProSkin ? IconForDarkSkinGuid : IconForLightSkinGuid);
             titleContent = new GUIContent(WindowTitle, icon);
             minSize = new Vector2(480f, 200f);
-            SetRecorderActive(true);
+            SetRecorderActive(isRecordingEnabled);
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
         }
 
         private void OnDisable()
         {
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
             SetRecorderActive(false);
         }
 
@@ -113,9 +119,32 @@ namespace reromanlee.EventAggregator.Editor
             Toolbar toolbar = new();
             toolbar.Add(new ToolbarButton(OnClearClicked) { text = "Clear", tooltip = "Discard all recorded events." });
 
+            ToolbarToggle clearOnPlayToggle = new() { text = "Clear on Play", value = clearOnPlay, tooltip = "Discard recorded events when entering Play Mode." };
+            clearOnPlayToggle.RegisterValueChangedCallback(change => clearOnPlay = change.newValue);
+            toolbar.Add(clearOnPlayToggle);
+
+            ToolbarToggle recordToggle = new() { text = "Record", value = isRecordingEnabled, tooltip = "Capture publishes and deliveries. Paused buses skip all tracing work." };
+            recordToggle.RegisterValueChangedCallback(change =>
+            {
+                isRecordingEnabled = change.newValue;
+                SetRecorderActive(isRecordingEnabled);
+                UpdateEmptyLabel();
+            });
+            toolbar.Add(recordToggle);
+
             VisualElement spacer = new();
             spacer.AddToClassList("event-debugger__spacer");
             toolbar.Add(spacer);
+
+            ToolbarSearchField searchField = new() { tooltip = "Filter by event, publisher or listener name." };
+            searchField.SetValueWithoutNotify(searchText);
+            searchField.AddToClassList("event-debugger__search");
+            searchField.RegisterValueChangedCallback(change =>
+            {
+                searchText = change.newValue ?? string.Empty;
+                RebuildVisibleEntries(scrollToBottom: true);
+            });
+            toolbar.Add(searchField);
 
             busMenu = new ToolbarMenu { text = selectedBusName, tooltip = "Show events of one bus, or of all buses." };
             busMenu.AddToClassList("event-debugger__bus-menu");
@@ -144,6 +173,21 @@ namespace reromanlee.EventAggregator.Editor
         {
             EventBusDebugger.Clear();
             ResetRows();
+        }
+
+        private void OnPlayModeStateChanged(PlayModeStateChange change)
+        {
+            // Cleared before Play Mode code runs, so events from the first Awake/OnEnable calls are kept.
+            if (change != PlayModeStateChange.ExitingEditMode || !clearOnPlay)
+            {
+                return;
+            }
+
+            EventBusDebugger.Clear();
+            if (listView != null)
+            {
+                ResetRows();
+            }
         }
 
         /// <summary>Cheap poll: does real work only when the trace changed since the last one.</summary>
@@ -232,8 +276,15 @@ namespace reromanlee.EventAggregator.Editor
 
         private bool Matches(in EventBusDebugger.TraceEntry entry)
         {
-            return selectedBusName == AllBusesChoice
-                || (busNamesById.TryGetValue(entry.BusId, out string busName) && busName == selectedBusName);
+            if (selectedBusName != AllBusesChoice
+                && (!busNamesById.TryGetValue(entry.BusId, out string busName) || busName != selectedBusName))
+            {
+                return false;
+            }
+
+            return searchText.Length == 0
+                || TypeNames.Get(entry.EventType).IndexOf(searchText, System.StringComparison.OrdinalIgnoreCase) >= 0
+                || TypeNames.Get(entry.SubjectType).IndexOf(searchText, System.StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void BindRow(VisualElement element, int index)
@@ -350,9 +401,9 @@ namespace reromanlee.EventAggregator.Editor
             emptyLabel.style.display = isEmpty ? DisplayStyle.Flex : DisplayStyle.None;
             if (isEmpty)
             {
-                emptyLabel.text = retainedEntries.Count > 0
-                    ? "No events match the current filter."
-                    : "No events recorded yet.\nEvents published while this window is open appear here.";
+                emptyLabel.text = retainedEntries.Count > 0 ? "No events match the current filter."
+                    : isRecordingEnabled ? "No events recorded yet.\nEvents published while this window is open appear here."
+                    : "Recording is paused.\nEnable Record in the toolbar to capture events.";
             }
         }
 
