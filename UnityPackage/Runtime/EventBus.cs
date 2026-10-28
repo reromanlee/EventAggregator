@@ -1,5 +1,6 @@
 using System;
-using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using UnityEngine;
 
 namespace reromanlee.EventAggregator
@@ -8,14 +9,13 @@ namespace reromanlee.EventAggregator
     /// Thread-safe <see cref="IEventBus"/> implementation optimized for a publish-heavy workload.
     /// </summary>
     /// <remarks>
-    /// <para><b>Performance.</b> Each event type keeps an immutable snapshot of its listeners that is
-    /// rebuilt only when a listener is added or removed, so <see cref="Publish{TEvent}"/> takes no locks
-    /// and allocates no memory — safe to call every frame without GC pressure.</para>
+    /// <para><b>Performance.</b> <see cref="Publish{TEvent}"/> never locks and never allocates: it finds the
+    /// event type's listeners with one array read and walks them directly. Subscribing and unsubscribing are
+    /// amortized O(1), so even thousands of listeners joining in one frame cost linear time and memory.</para>
     /// <para><b>Delivery semantics.</b> Events are delivered synchronously on the publishing thread, in
-    /// subscription order. A publish dispatches to the listeners subscribed at the moment it starts;
-    /// listeners added or removed mid-publish (by a handler or another thread) take effect for
-    /// subsequent publishes only. A listener that throws is logged and skipped, and the remaining
-    /// listeners still receive the event.</para>
+    /// subscription order. Listeners added during a publish receive events from the next publish on.
+    /// Listeners removed during a publish stop receiving immediately, including the rest of the publish in
+    /// progress. A listener that throws is logged and skipped; the remaining listeners still receive the event.</para>
     /// <para><b>Lifetime.</b> The bus holds strong references to listeners. A listener that is never
     /// unsubscribed is kept alive and keeps receiving events, so teardown code must always unsubscribe.
     /// Unsubscribing after the bus was disposed is a harmless no-op.</para>
@@ -24,8 +24,8 @@ namespace reromanlee.EventAggregator
     /// reported as an error instead of crashing the player with an undebuggable stack overflow.
     /// The check is compiled out of release builds entirely.</para>
     /// <para><b>Debugging.</b> In the editor, every bus reports its publishes and deliveries to the
-    /// Event Debugger window (Tools ▸ Event Debugger), where instances appear as "EventBus N" or the
-    /// name given via <see cref="SetDebugName"/>. All of this instrumentation — including calls to
+    /// Event Debugger window, where instances appear as "EventBus N" or the name given via
+    /// <see cref="SetDebugName"/>. All of this instrumentation — including calls to
     /// <see cref="SetDebugName"/> — is compiled out of player builds and costs nothing there.</para>
     /// </remarks>
     public sealed class EventBus : IEventBus, IDisposable
@@ -41,27 +41,24 @@ namespace reromanlee.EventAggregator
         [ThreadStatic] private static int publishDepth;
 #endif
 
-        // Listener groups keyed by event type. A ConcurrentDictionary lets the publish path read
-        // lock-free while Subscribe/Unsubscribe/Dispose mutate under mutationLock. Entries are only
-        // ever added or cleared, never replaced, so a raced read always sees a valid group.
-        // concurrencyLevel is 1 because writes are already serialized by mutationLock; the default
-        // would allocate one internal lock stripe per CPU core per bus for nothing.
-        private readonly ConcurrentDictionary<Type, IEventListeners> listenerTypes = new(concurrencyLevel: 1, capacity: 31);
+        // Listener groups indexed by EventTypeIndex<TEvent>.Value. Publish reads lock-free; Subscribe fills an
+        // empty slot or swaps in a grown copy under mutationLock.
+        private volatile IEventListeners[] groups = Array.Empty<IEventListeners>();
 
-        // Serializes all mutations (Subscribe/Unsubscribe/Dispose). Never held while listeners run,
-        // so handlers are free to publish, subscribe, or unsubscribe re-entrantly without deadlocking.
+        // Serializes all mutations. Never held while listeners run, so handlers may publish, subscribe, or
+        // unsubscribe re-entrantly without deadlocking.
         private readonly object mutationLock = new();
 
         private volatile bool isDisposed;
 
 #if UNITY_EDITOR
-        // Identifies this instance in the editor-only Event Debugger window (Tools ▸ Event Debugger).
+        // Identifies this instance in the editor-only Event Debugger window.
         private readonly int debugId;
 #endif
 
         /// <summary>
         /// Creates an empty bus. In the editor, the instance registers itself with the
-        /// Event Debugger window (Tools ▸ Event Debugger); player builds skip registration entirely.
+        /// Event Debugger window; player builds skip registration entirely.
         /// </summary>
         public EventBus()
         {
@@ -101,15 +98,16 @@ namespace reromanlee.EventAggregator
             EventBusDebugger.OnPublish(debugId, typeof(TEvent), publishDepth);
 #endif
 
-            // No subscribers for this event type (yet) is a normal situation, not an error:
-            // the listening system may simply not be active. Deliberately a silent no-op.
-            if (!listenerTypes.TryGetValue(typeof(TEvent), out IEventListeners group))
+            // No subscribers for this event type (yet) is a normal situation, not an error: the listening
+            // system may simply not be active. Deliberately a silent no-op.
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            if (group == null)
             {
                 return;
             }
 
-            IEventListener<TEvent>[] snapshot = ((EventListeners<TEvent>)group).Snapshot;
-            if (snapshot.Length == 0)
+            Subscription<TEvent>[] subscriptions = group.GetSubscriptions(out int length);
+            if (length == 0)
             {
                 return;
             }
@@ -125,12 +123,18 @@ namespace reromanlee.EventAggregator
             try
             {
 #endif
-                for (int i = 0; i < snapshot.Length; i++)
+                for (int i = 0; i < length; i++)
                 {
+                    Subscription<TEvent> subscription = subscriptions[i];
+                    if (subscription == null || !subscription.IsActive)
+                    {
+                        continue;
+                    }
+
 #if UNITY_EDITOR
                     // Record the delivery one level deeper than its publish, and mark this listener
                     // as the executing handler so any events it publishes are attributed to it.
-                    string listenerName = snapshot[i].GetType().Name;
+                    string listenerName = subscription.Listener.GetType().Name;
                     EventBusDebugger.OnDelivery(debugId, typeof(TEvent), listenerName, publishDepth);
                     string previousHandler = EventBusDebugger.BeginHandler(listenerName);
                     try
@@ -138,12 +142,12 @@ namespace reromanlee.EventAggregator
 #endif
                     try
                     {
-                        snapshot[i].Handle(eventData);
+                        subscription.Listener.Handle(eventData);
                     }
                     catch (Exception exception)
                     {
                         Debug.LogError(
-                            $"Listener '{snapshot[i].GetType().Name}' threw while handling '{typeof(TEvent).Name}':\n{exception}");
+                            $"Listener '{subscription.Listener.GetType().Name}' threw while handling '{typeof(TEvent).Name}':\n{exception}");
                     }
 #if UNITY_EDITOR
                     }
@@ -171,36 +175,22 @@ namespace reromanlee.EventAggregator
             {
                 throw new ArgumentNullException(nameof(listener));
             }
-            if (isDisposed)
-            {
-                throw new ObjectDisposedException(nameof(EventBus));
-            }
 
+            bool isDuplicate;
             lock (mutationLock)
             {
-                // Re-check under the lock so a listener cannot slip in after Dispose cleared everything.
                 if (isDisposed)
                 {
                     throw new ObjectDisposedException(nameof(EventBus));
                 }
+                isDuplicate = !GetOrCreateGroup<TEvent>().Add(listener);
+            }
 
-                EventListeners<TEvent> group;
-                if (listenerTypes.TryGetValue(typeof(TEvent), out IEventListeners existing))
-                {
-                    group = (EventListeners<TEvent>)existing;
-                }
-                else
-                {
-                    group = new EventListeners<TEvent>();
-                    listenerTypes[typeof(TEvent)] = group;
-                }
-
-                if (!group.Add(listener))
-                {
-                    // A duplicate subscription would make the listener handle every event twice.
-                    Debug.LogWarning(
-                        $"Listener '{listener.GetType().Name}' is already subscribed to '{typeof(TEvent).Name}'; duplicate subscription ignored.");
-                }
+            if (isDuplicate)
+            {
+                // A duplicate subscription would make the listener handle every event twice.
+                Debug.LogWarning(
+                    $"Listener '{listener.GetType().Name}' is already subscribed to '{typeof(TEvent).Name}'; duplicate subscription ignored.");
             }
         }
 
@@ -213,8 +203,8 @@ namespace reromanlee.EventAggregator
                 throw new ArgumentNullException(nameof(listener));
             }
 
-            // Unsubscribing after disposal is a no-op rather than an error: teardown code
-            // (OnDestroy/OnDisable) routinely runs after the bus's owner has disposed it.
+            // Unsubscribing after disposal is a no-op rather than an error: teardown code (OnDisable/OnDestroy)
+            // routinely runs after the bus's owner has disposed it.
             if (isDisposed)
             {
                 return;
@@ -222,17 +212,17 @@ namespace reromanlee.EventAggregator
 
             lock (mutationLock)
             {
-                if (!isDisposed && listenerTypes.TryGetValue(typeof(TEvent), out IEventListeners group))
+                if (!isDisposed)
                 {
-                    ((EventListeners<TEvent>)group).Remove(listener);
+                    FindGroup<TEvent>()?.Remove(listener);
                 }
             }
         }
 
         /// <summary>
-        /// Releases all listeners. After disposal, <see cref="Publish{TEvent}"/> and
-        /// <see cref="Subscribe{TEvent}"/> throw <see cref="ObjectDisposedException"/>, while
-        /// <see cref="Unsubscribe{TEvent}"/> becomes a no-op so teardown code stays safe.
+        /// Releases all listeners and stops any delivery still in progress. After disposal,
+        /// <see cref="Publish{TEvent}"/> and <see cref="Subscribe{TEvent}"/> throw <see cref="ObjectDisposedException"/>,
+        /// while <see cref="Unsubscribe{TEvent}"/> becomes a no-op so teardown code stays safe.
         /// Disposing more than once is allowed.
         /// </summary>
         public void Dispose()
@@ -250,18 +240,52 @@ namespace reromanlee.EventAggregator
                 }
                 isDisposed = true;
 
-#if UNITY_EDITOR
-                EventBusDebugger.Unregister(debugId);
-#endif
-
-                // Empty every snapshot so a publish that already passed the disposed check
-                // delivers to no one instead of to stale listeners.
-                foreach (IEventListeners group in listenerTypes.Values)
+                IEventListeners[] current = groups;
+                groups = Array.Empty<IEventListeners>();
+                foreach (IEventListeners group in current)
                 {
-                    group.Clear();
+                    group?.Clear();
                 }
-                listenerTypes.Clear();
             }
+
+#if UNITY_EDITOR
+            EventBusDebugger.Unregister(debugId);
+#endif
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private EventListeners<TEvent> FindGroup<TEvent>()
+        {
+            int typeIndex = EventTypeIndex<TEvent>.Value;
+            IEventListeners[] current = groups;
+            return (uint)typeIndex < (uint)current.Length ? (EventListeners<TEvent>)current[typeIndex] : null;
+        }
+
+        /// <summary>Must be called under <see cref="mutationLock"/>.</summary>
+        private EventListeners<TEvent> GetOrCreateGroup<TEvent>()
+        {
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            if (group != null)
+            {
+                return group;
+            }
+
+            group = new EventListeners<TEvent>();
+            int typeIndex = EventTypeIndex<TEvent>.Value;
+            IEventListeners[] current = groups;
+            if (typeIndex < current.Length)
+            {
+                // Release semantics: a lock-free reader that sees the group also sees it fully constructed.
+                Volatile.Write(ref current[typeIndex], group);
+            }
+            else
+            {
+                IEventListeners[] grown = new IEventListeners[Math.Max(typeIndex + 1, current.Length + current.Length / 2)];
+                Array.Copy(current, grown, current.Length);
+                grown[typeIndex] = group;
+                groups = grown;
+            }
+            return group;
         }
     }
 }
