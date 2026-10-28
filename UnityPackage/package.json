@@ -15,6 +15,13 @@
     "messaging"
   ],
   "licensesUrl": "https://github.com/reromanlee/EventAggregator/blob/main/LICENSE.md",
+  "samples": [
+    {
+      "displayName": "Getting Started",
+      "description": "A composition root that owns the bus, plus a publisher and listeners showing the OnEnable/OnDisable pattern, a listener of two event types, and a chained event in the Event Debugger.",
+      "path": "Samples~/GettingStarted"
+    }
+  ],
   "author": {
     "name": "Roman Likhadievski",
     "url": "https://github.com/reromanlee",
