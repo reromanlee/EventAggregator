@@ -19,7 +19,8 @@ namespace reromanlee.EventAggregator
     /// progress. A listener that throws is logged and skipped; the remaining listeners still receive the event.</para>
     /// <para><b>Lifetime.</b> The bus holds strong references to listeners, so teardown code should always
     /// unsubscribe. A listener that is a destroyed Unity object is skipped and unsubscribed automatically, with
-    /// a warning in the editor and development builds. Unsubscribing after the bus was disposed is a harmless no-op.</para>
+    /// a warning in the editor and development builds. After <see cref="Dispose"/>, publishing and
+    /// unsubscribing are harmless no-ops, so teardown order never matters.</para>
     /// <para><b>Recursion.</b> In the editor and development builds, runaway recursive publishing (a handler
     /// for event A publishing B whose handler publishes A again, forever) is reported as an error and the rest
     /// of that event chain is cancelled, instead of crashing with an undebuggable stack overflow or freezing on
@@ -54,6 +55,7 @@ namespace reromanlee.EventAggregator
         private readonly object mutationLock = new();
 
         private volatile bool isDisposed;
+        private bool hasWarnedPublishAfterDispose;
 
 #if UNITY_EDITOR
         // Identifies this instance in the editor-only Event Debugger window.
@@ -88,12 +90,16 @@ namespace reromanlee.EventAggregator
         }
 
         /// <inheritdoc/>
-        /// <exception cref="ObjectDisposedException">The bus has been disposed.</exception>
+        /// <remarks>
+        /// Publishing on a disposed bus does nothing; the editor and development builds log one warning per bus,
+        /// since it usually means an object outlived the bus's owner.
+        /// </remarks>
         public void Publish<TEvent>(TEvent eventData)
         {
             if (isDisposed)
             {
-                throw new ObjectDisposedException(nameof(EventBus));
+                WarnPublishAfterDispose<TEvent>();
+                return;
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -242,10 +248,10 @@ namespace reromanlee.EventAggregator
         }
 
         /// <summary>
-        /// Releases all listeners and stops any delivery still in progress. After disposal,
-        /// <see cref="Publish{TEvent}"/> and <see cref="Subscribe{TEvent}"/> throw <see cref="ObjectDisposedException"/>,
-        /// while <see cref="Unsubscribe{TEvent}"/> becomes a no-op so teardown code stays safe.
-        /// Disposing more than once is allowed.
+        /// Releases all listeners and stops any delivery still in progress. Afterwards <see cref="Publish{TEvent}"/>
+        /// and <see cref="Unsubscribe{TEvent}"/> are harmless no-ops, while <see cref="Subscribe{TEvent}"/> throws
+        /// <see cref="ObjectDisposedException"/> because that listener would never receive anything. Disposing more
+        /// than once is allowed.
         /// </summary>
         public void Dispose()
         {
@@ -322,6 +328,21 @@ namespace reromanlee.EventAggregator
             {
                 WarnDestroyedListener<TEvent>(subscription);
             }
+        }
+
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD")]
+        private void WarnPublishAfterDispose<TEvent>()
+        {
+            if (hasWarnedPublishAfterDispose)
+            {
+                return;
+            }
+            hasWarnedPublishAfterDispose = true;
+
+            Debug.LogWarning(
+                $"'{typeof(TEvent).Name}' was published on a disposed EventBus and ignored. This usually means an object " +
+                "outlived the bus's owner, e.g. publishing from OnDisable or OnDestroy during teardown. " +
+                "Further publishes on this bus are ignored without a warning.");
         }
 
         [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD")]
