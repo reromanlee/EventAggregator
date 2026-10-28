@@ -1,7 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
-using UnityEngine;
+using Debug = UnityEngine.Debug;
 
 namespace reromanlee.EventAggregator
 {
@@ -16,9 +17,9 @@ namespace reromanlee.EventAggregator
     /// subscription order. Listeners added during a publish receive events from the next publish on.
     /// Listeners removed during a publish stop receiving immediately, including the rest of the publish in
     /// progress. A listener that throws is logged and skipped; the remaining listeners still receive the event.</para>
-    /// <para><b>Lifetime.</b> The bus holds strong references to listeners. A listener that is never
-    /// unsubscribed is kept alive and keeps receiving events, so teardown code must always unsubscribe.
-    /// Unsubscribing after the bus was disposed is a harmless no-op.</para>
+    /// <para><b>Lifetime.</b> The bus holds strong references to listeners, so teardown code should always
+    /// unsubscribe. A listener that is a destroyed Unity object is skipped and unsubscribed automatically, with
+    /// a warning in the editor and development builds. Unsubscribing after the bus was disposed is a harmless no-op.</para>
     /// <para><b>Recursion.</b> In the editor and development builds, runaway recursive publishing
     /// (a handler for event A publishing B whose handler publishes A again, forever) is detected and
     /// reported as an error instead of crashing the player with an undebuggable stack overflow.
@@ -75,7 +76,7 @@ namespace reromanlee.EventAggregator
         /// <param name="name">The display name shown in the debugger window. Avoid ending it with
         /// Unity menu shortcut notation ('#', '%', '&amp;' or '_' followed by a character), which
         /// editor dropdowns would render as a keyboard shortcut instead of text.</param>
-        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        [Conditional("UNITY_EDITOR")]
         public void SetDebugName(string name)
         {
 #if UNITY_EDITOR
@@ -128,6 +129,12 @@ namespace reromanlee.EventAggregator
                     Subscription<TEvent> subscription = subscriptions[i];
                     if (subscription == null || !subscription.IsActive)
                     {
+                        continue;
+                    }
+
+                    if (subscription.IsDestroyed)
+                    {
+                        RemoveDestroyedListener(group, subscription);
                         continue;
                     }
 
@@ -286,6 +293,28 @@ namespace reromanlee.EventAggregator
                 groups = grown;
             }
             return group;
+        }
+
+        private void RemoveDestroyedListener<TEvent>(EventListeners<TEvent> group, Subscription<TEvent> subscription)
+        {
+            bool isRemoved;
+            lock (mutationLock)
+            {
+                isRemoved = !isDisposed && group.Remove(subscription);
+            }
+
+            if (isRemoved)
+            {
+                WarnDestroyedListener<TEvent>(subscription);
+            }
+        }
+
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD")]
+        private static void WarnDestroyedListener<TEvent>(Subscription<TEvent> subscription)
+        {
+            Debug.LogWarning(
+                $"Listener '{subscription.Listener.GetType().Name}' was destroyed while still subscribed to '{typeof(TEvent).Name}' " +
+                "and has been unsubscribed automatically. Unsubscribe in OnDisable or OnDestroy to release it deterministically.");
         }
     }
 }
