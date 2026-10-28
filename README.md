@@ -1,137 +1,102 @@
-# EventAggregator
+### About EventAggregator
 
-A minimal, allocation-free, type-keyed publish/subscribe event bus for Unity. Producers publish plain C# objects or structs; listeners subscribe per event type. No reflection, no code generation, no dependencies — two interfaces and one class.
+A type-keyed publish/subscribe event bus for Unity that publishes without locks or garbage, from any thread, on every platform.
+
+Producers publish plain structs or classes; listeners implement `IEventListener<T>` and subscribe per event type. The whole API is two interfaces and one class, with no reflection, code generation or dependencies, so it behaves identically under Mono and IL2CPP, with managed code stripping, on desktop, mobile, consoles and WebGL.
+
+It is built for long-running production use: listeners removed mid-publish stop at once, destroyed MonoBehaviours are pruned automatically, a throwing listener never blocks the rest, and teardown order can never crash shutdown code. The Event Debugger window shows every publish and delivery live, as a tree of chain reactions.
 
 ![Event Debugger showcase](.github/readme-event-debugger.gif)
 
-## Features
+### Features
 
-- **Zero-GC publishing** — `Publish` allocates no memory and takes no locks, so it is safe to call every frame on hot paths.
-- **Thread-safe** — publish from any thread; subscriptions are safely serialized. Handlers may re-entrantly publish, subscribe, or unsubscribe without deadlocking.
-- **Fault isolation** — a listener that throws is logged and skipped; the remaining listeners still receive the event.
-- **AOT-friendly** — pure C#, no reflection or `Reflection.Emit`, safe under IL2CPP and aggressive managed code stripping on every Unity platform.
-- **Debuggable failure modes** — in the editor and development builds, an infinite recursive publish loop (event A triggering B triggering A …) is reported as a clear error instead of a stack-overflow crash. The check compiles out of release builds.
+1. Zero-allocation, lock-free publishing
+2. Thread-safe and fully re-entrant
+3. IL2CPP, stripping and WebGL safe
+4. Live Event Debugger window
+5. Unsubscribe takes effect mid-publish
+6. Destroyed Unity listeners auto-pruned
+7. Throwing listeners never block others
+8. O(1) subscribe, even in huge bursts
+9. Infinite-loop guard in dev builds
 
-## Installation
+Detailed about features - see [FEATURES.md](Documentation/FEATURES.md). How the package is tested - see [TESTING.md](Documentation/TESTING.md).
 
-In Unity, open **Window ▸ Package Manager ▸ + ▸ Add package from git URL…** and enter:
+### Performance
 
-```
-https://github.com/reromanlee/EventAggregator.git?path=/UnityPackage
-```
+**Publishing allocates nothing and never locks.** In an IL2CPP release build on an Intel Core i7-12700K, a publish costs about 10 ns plus about 3 ns per listener: 13 ns for one listener and 43 ns for ten. The hot path performs a single memory fence regardless of listener count, which keeps it cheap on ARM mobile devices, where IL2CPP's fences are costly.
 
-Or add it to `Packages/manifest.json` directly:
+**Subscribing scales linearly.** 5,000 listeners joining one event in a single frame take about 2 ms and 1 MB under IL2CPP, so spawn waves stay safe even on WebGL, where garbage can only be collected between frames. With the Event Debugger closed or paused, the editor adds a single flag check per publish.
 
-```json
-{
-  "dependencies": {
-    "com.reromanlee.eventaggregator": "https://github.com/reromanlee/EventAggregator.git?path=/UnityPackage"
-  }
-}
-```
+Detailed about performance - see [PERFORMANCE.md](Documentation/PERFORMANCE.md).
 
-Requires Unity 6000.0 or newer.
+### Requirements
 
-## Quick start
+1. Unity 2022.3 LTS or newer, including Unity 6.
+2. Mono or IL2CPP scripting backend.
+3. No package dependencies.
+
+### Limitations
+
+1. Events match their exact type only.
+2. Delivery is synchronous, on the publishing thread.
+3. Listeners stay referenced until unsubscribed.
+4. Listeners must be classes, not structs.
+5. The loop guard exists in editor and dev builds only.
+
+### How to install
+
+1. **Git URL.** In Unity, open **Window ▸ Package Manager ▸ + ▸ Add package from git URL…** and enter `https://github.com/reromanlee/EventAggregator.git?path=/UnityPackage#1.0.0`. Drop `#1.0.0` to track the latest `main` instead of a release.
+2. **Manifest.** Add the same URL to `Packages/manifest.json`:
+
+   ```json
+   {
+     "dependencies": {
+       "com.reromanlee.eventaggregator": "https://github.com/reromanlee/EventAggregator.git?path=/UnityPackage#1.0.0"
+     }
+   }
+   ```
+
+3. **Tarball.** Download `com.reromanlee.eventaggregator-1.0.0.tgz` from the [latest release](https://github.com/reromanlee/EventAggregator/releases/latest), then choose **+ ▸ Add package from tarball…** in the Package Manager.
+
+The **Getting Started** sample can then be imported from the package's **Samples** tab in the Package Manager.
+
+### How to use
+
+**Create one `EventBus` at your composition root** (a bootstrap MonoBehaviour or your DI container), share it through `IEventBus`, and call `Dispose` on shutdown. Define events as small `readonly struct`s, which flow through the bus without boxing or garbage.
 
 ```csharp
 using reromanlee.EventAggregator;
-using UnityEngine;
 
-// 1. Define an event. Structs are recommended: they flow through the bus
-//    generically, with no boxing and no garbage.
 public readonly struct ScoreChanged
 {
-    public readonly int NewScore;
-    public ScoreChanged(int newScore) => NewScore = newScore;
+    public readonly int Score;
+    public ScoreChanged(int score) => Score = score;
 }
 
-// 2. Implement a listener and subscribe it. Always pair Subscribe with
-//    Unsubscribe — the bus holds a strong reference to the listener.
-public sealed class ScoreHud : MonoBehaviour, IEventListener<ScoreChanged>
+eventBus.Publish(new ScoreChanged(42));
+```
+
+**Listeners implement `IEventListener<T>` and pair `Subscribe` with `Unsubscribe`**, ideally in `OnEnable` and `OnDisable`, so a disabled object never handles events. A class listening to several event types names each type explicitly, as in `Subscribe<ScoreChanged>(this)`.
+
+```csharp
+public sealed class ScoreLabel : MonoBehaviour, IEventListener<ScoreChanged>
 {
-    private IEventBus eventBus; // provide via your DI container, service locator, etc.
+    private IEventBus eventBus; // injected by your composition root
 
     private void OnEnable() => eventBus.Subscribe(this);
     private void OnDisable() => eventBus.Unsubscribe(this);
 
-    public void Handle(ScoreChanged eventData)
-    {
-        Debug.Log($"Score is now {eventData.NewScore}");
-    }
+    public void Handle(ScoreChanged eventData) => Debug.Log($"Score: {eventData.Score}");
 }
-
-// 3. Publish from anywhere.
-eventBus.Publish(new ScoreChanged(42));
 ```
 
-Create one `EventBus` at your composition root and share it through `IEventBus`; call `Dispose` on shutdown to release all listeners. A single class can implement `IEventListener<T>` for several event types and subscribe to each.
+**Open Window ▸ Analysis ▸ Event Debugger** to watch events live, and name buses with `bus.SetDebugName("Gameplay")`, which is stripped from player builds. Use `bus.HasListeners<T>()` to skip building expensive events nobody listens to.
 
-## Delivery semantics
+Detailed about usage - see [USAGE.md](Documentation/USAGE.md).
 
-- Events are delivered **synchronously on the publishing thread**, in subscription order. `Publish` returns after the last listener runs.
-- Event types are **matched exactly**: publishing a derived event does not notify listeners of its base type.
-- Publishing an event that has no subscribers is a valid, silent no-op.
-- A publish dispatches to the listeners subscribed **at the moment it starts**; listeners added or removed mid-publish (by a handler or another thread) take effect for subsequent publishes only.
-- Duplicate subscriptions of the same listener instance to the same event type are ignored (with a warning), so a listener never handles one event twice.
-- After `Dispose`, `Publish` and `Subscribe` throw `ObjectDisposedException`, while `Unsubscribe` is a harmless no-op — teardown code in `OnDestroy`/`OnDisable` stays safe regardless of destruction order.
+### License
 
-## Performance
+Made by Roman Likhadievski (reromanlee.com).
 
-`Publish` is the designed-for hot path: one lock-free dictionary lookup by event type, then a plain array walk with one interface call per listener. It allocates **zero bytes** — listener lists are stored as immutable snapshot arrays that are only rebuilt when a listener is added or removed, so publishing produces no garbage regardless of frequency.
-
-| Operation | Cost |
-|---|---|
-| `Publish` | O(number of listeners); lock-free; **0 B allocated** |
-| `Subscribe` / `Unsubscribe` | O(number of listeners) under a short lock; allocates one small snapshot array |
-| Struct events | No boxing anywhere on the publish path |
-
-On a desktop .NET runtime, a publish measures in the tens of nanoseconds plus ~1–3 ns per listener; Unity's Mono and IL2CPP runtimes are somewhat slower per interface call, but the shape is the same — the cost of `Publish` is essentially the cost of your handlers.
-
-## Memory footprint
-
-The bus itself is small and reaches a fixed steady state (measured on 64-bit; Unity runtimes vary slightly):
-
-| What | Approximate size |
-|---|---|
-| One `EventBus` instance | ~2.5 KB |
-| Each distinct event type | ~200 B |
-| Each subscribed listener | ~16 B (two references) |
-| Each `Publish` | 0 B |
-
-Subscribing and unsubscribing produce a small, short-lived snapshot array each time; these are rare, tiny, and collected in generation 0. Note that the bus holds **strong references** to listeners: a listener that never unsubscribes is kept alive (and keeps receiving events) for the lifetime of the bus — always unsubscribe when a listener's lifetime ends.
-
-## Thread safety and async
-
-All members are thread-safe. Publishing is lock-free; subscription changes serialize on a single internal lock that is never held while handlers execute, which is why handlers can freely publish or (un)subscribe re-entrantly. Handlers run synchronously on whichever thread called `Publish` — if that is a background thread, remember that most Unity APIs may only be touched from the main thread. `async` code can call `Publish` normally; the bus never blocks on or awaits handler code.
-
-## Platform support
-
-The implementation is pure C# against .NET Standard 2.1 (`ConcurrentDictionary`, `volatile`, `lock`, `[ThreadStatic]`) with no reflection, no runtime code generation, and no platform-specific calls. It behaves identically under Mono and IL2CPP on all Unity targets — desktop, mobile, consoles, and WebGL (where, without threads, the synchronization simply never contends) — and requires no link.xml or `[Preserve]` attributes under managed stripping.
-
-## Event Debugger window
-
-**Tools ▸ Event Debugger** opens a live trace of every bus in the session: each publish shows who
-fired which event, followed by a row per listener that received it. Events published from inside a
-handler are indented one level deeper, so chain reactions read as a tree. Each root publish and
-everything it triggered are grouped into one block, newest at the bottom; the view follows new
-events automatically unless you scroll up to read history, and re-attaches when you scroll back
-down. A dropdown filters the view to a single bus — instances appear as "EventBus 1",
-"EventBus 2", … in creation order, or under a custom name:
-
-```csharp
-var bus = new EventBus();
-bus.SetDebugName("Gameplay"); // editor-only; this call is stripped from player builds entirely
-```
-
-All of the instrumentation behind the window is compiled only in the editor. Player builds —
-including development builds — contain none of it, so the zero-allocation, lock-free publish path
-is exactly the same with or without the debugger.
-
-## Recursive events
-
-Handlers publishing further events is normal and supported. What is not survivable is an *infinite* publish cycle (A → B → A → …), which would crash a release player with an undebuggable stack overflow. In the editor and development builds the bus tracks publish depth per thread and reports an error naming the event type once a cycle exceeds depth 64; the check does not exist in release builds, so it costs nothing where performance matters. Fixing the cycle itself remains, deliberately, the developer's job.
-
-## License
-
-[MIT](LICENSE.md) © Roman Likhadievski
+Licensed under MIT - see [LICENSE.md](LICENSE.md).
