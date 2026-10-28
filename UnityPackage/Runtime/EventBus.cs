@@ -170,8 +170,7 @@ namespace reromanlee.EventAggregator
                     }
                     catch (Exception exception)
                     {
-                        Debug.LogError(
-                            $"Listener '{subscription.Listener.GetType().Name}' threw while handling '{typeof(TEvent).Name}':\n{exception}");
+                        ReportListenerException(subscription, exception);
                     }
 #if UNITY_EDITOR
                     }
@@ -218,7 +217,8 @@ namespace reromanlee.EventAggregator
             {
                 // A duplicate subscription would make the listener handle every event twice.
                 Debug.LogWarning(
-                    $"Listener '{listener.GetType().Name}' is already subscribed to '{typeof(TEvent).Name}'; duplicate subscription ignored.");
+                    $"Listener '{listener.GetType().Name}' is already subscribed to '{typeof(TEvent).Name}'; duplicate subscription ignored.",
+                    listener as UnityEngine.Object);
             }
         }
 
@@ -328,6 +328,13 @@ namespace reromanlee.EventAggregator
             {
                 WarnDestroyedListener<TEvent>(subscription);
             }
+        }
+
+        private static void ReportListenerException<TEvent>(Subscription<TEvent> subscription, Exception exception)
+        {
+            // LogException keeps the original stack trace clickable in the Console, and the listener as context
+            // highlights its GameObject when the entry is selected.
+            Debug.LogException(exception, subscription.UnityObject);
         }
 
         [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD")]
