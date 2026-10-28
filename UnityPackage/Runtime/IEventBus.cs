@@ -51,5 +51,15 @@ namespace reromanlee.EventAggregator
         /// <typeparam name="TEvent">The event type to stop receiving.</typeparam>
         /// <param name="listener">The previously subscribed listener.</param>
         void Unsubscribe<TEvent>(IEventListener<TEvent> listener);
+
+        /// <summary>
+        /// Returns whether at least one listener is subscribed to <typeparamref name="TEvent"/>.
+        /// </summary>
+        /// <remarks>
+        /// Lock-free and allocation-free. Use it to skip building expensive events that nobody listens to:
+        /// <c>if (bus.HasListeners&lt;DamageDealt&gt;()) bus.Publish(new DamageDealt(...));</c>
+        /// </remarks>
+        /// <typeparam name="TEvent">The event type to check.</typeparam>
+        bool HasListeners<TEvent>();
     }
 }

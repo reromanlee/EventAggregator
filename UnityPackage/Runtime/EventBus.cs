@@ -245,11 +245,23 @@ namespace reromanlee.EventAggregator
             }
         }
 
+        /// <inheritdoc/>
+        public bool HasListeners<TEvent>()
+        {
+            if (isDisposed)
+            {
+                return false;
+            }
+
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            return group != null && group.ActiveCount > 0;
+        }
+
         /// <summary>
-        /// Releases all listeners and stops any delivery still in progress. Afterwards <see cref="Publish{TEvent}"/>
-        /// and <see cref="Unsubscribe{TEvent}"/> are harmless no-ops, while <see cref="Subscribe{TEvent}"/> throws
-        /// <see cref="ObjectDisposedException"/> because that listener would never receive anything. Disposing more
-        /// than once is allowed.
+        /// Releases all listeners and stops any delivery still in progress. Afterwards <see cref="Publish{TEvent}"/>,
+        /// <see cref="Unsubscribe{TEvent}"/> and <see cref="HasListeners{TEvent}"/> are harmless no-ops, while
+        /// <see cref="Subscribe{TEvent}"/> throws <see cref="ObjectDisposedException"/> because that listener would
+        /// never receive anything. Disposing more than once is allowed.
         /// </summary>
         public void Dispose()
         {
