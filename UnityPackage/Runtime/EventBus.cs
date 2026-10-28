@@ -195,13 +195,11 @@ namespace reromanlee.EventAggregator
 
         /// <inheritdoc/>
         /// <exception cref="ArgumentNullException"><paramref name="listener"/> is null.</exception>
+        /// <exception cref="ArgumentException"><paramref name="listener"/> is a value type.</exception>
         /// <exception cref="ObjectDisposedException">The bus has been disposed.</exception>
         public void Subscribe<TEvent>(IEventListener<TEvent> listener)
         {
-            if (listener == null)
-            {
-                throw new ArgumentNullException(nameof(listener));
-            }
+            ValidateListener(listener);
 
             bool isDuplicate;
             lock (mutationLock)
@@ -279,6 +277,22 @@ namespace reromanlee.EventAggregator
 #if UNITY_EDITOR
             EventBusDebugger.Unregister(debugId);
 #endif
+        }
+
+        private static void ValidateListener<TEvent>(IEventListener<TEvent> listener)
+        {
+            if (listener == null)
+            {
+                throw new ArgumentNullException(nameof(listener));
+            }
+
+            // A struct listener is boxed anew on every call, so Unsubscribe could never find the subscribed box.
+            if (listener.GetType().IsValueType)
+            {
+                throw new ArgumentException(
+                    $"Listener '{listener.GetType().Name}' is a value type; listeners must be classes so they can be unsubscribed.",
+                    nameof(listener));
+            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -37,7 +37,7 @@ namespace reromanlee.EventAggregator
         /// </remarks>
         /// <typeparam name="TEvent">The event type to receive.</typeparam>
         /// <param name="listener">The listener whose <see cref="IEventListener{TEvent}.Handle"/> is invoked on publish.
-        /// Listeners are identified by reference.</param>
+        /// Must be a class; listeners are identified by reference.</param>
         void Subscribe<TEvent>(IEventListener<TEvent> listener);
 
         /// <summary>
