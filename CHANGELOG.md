@@ -11,9 +11,9 @@
 7. Per-listener fault isolation through `Debug.LogException`, with clickable stack traces and the listener as log context.
 8. `HasListeners<TEvent>()` to skip building events that nobody listens to.
 9. Recursion guard in the editor and development builds that reports infinite publish loops and cancels the runaway chain, compiled out of release builds.
-10. Event Debugger window (Window ▸ Analysis ▸ Event Debugger): virtualized live trace of publishes and deliveries as a chain tree, with Record, Clear on Play, search, per-bus filtering, `EventBus.SetDebugName` and Light/Dark theme support, costing one flag check per publish while closed.
+10. Event Debugger window (Window ▸ Analysis ▸ Event Debugger): virtualized live trace of publishes and deliveries as a chain tree, even across buses, with the bus named on every publish row, Record, Clear on Play, search, per-bus filtering, `EventBus.SetDebugName` and Light/Dark theme support, costing one flag check per publish while closed.
 11. Listeners are identified by reference, so `Equals` overrides cannot break unsubscription, and struct listeners are rejected.
-12. Getting Started sample, Edit Mode and Play Mode test suites, and a GameCI workflow.
+12. Getting Started sample with application, user interface and per-match buses, chained events and presenters bridging buses, plus Edit Mode and Play Mode test suites and a GameCI workflow.
 13. Unity 2022.3 LTS and Unity 6 support; safe under IL2CPP, managed code stripping and WebGL.
 
 ### Important

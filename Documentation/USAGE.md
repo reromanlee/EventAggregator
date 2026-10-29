@@ -103,7 +103,7 @@ Handlers run synchronously on the publishing thread. When publishing from a back
 
 ### Debugging
 
-Open **Window ▸ Analysis ▸ Event Debugger** and enter Play Mode. Name your buses with `SetDebugName` so the bus filter reads clearly. Toggle **Record** off while profiling to remove the editor tracing cost entirely.
+Open **Window ▸ Analysis ▸ Event Debugger** and enter Play Mode. Name your buses with `SetDebugName` so the bus filter and the bus shown on each publish row read clearly. Toggle **Record** off while profiling to remove the editor tracing cost entirely.
 
 The bus reports problems in the Console instead of failing silently:
 

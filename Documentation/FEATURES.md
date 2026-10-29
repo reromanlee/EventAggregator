@@ -47,13 +47,13 @@ The implementation is pure C# against .NET Standard 2.1 (`Interlocked`, `Volatil
 
 ### Event Debugger window
 
-**Window ▸ Analysis ▸ Event Debugger** shows a live trace of every bus in the session. Each publish shows who fired which event, followed by a row per listener that received it. Events published from inside a handler are indented one level deeper, so chain reactions read as a tree, and each root publish starts a new block separated by a divider.
+**Window ▸ Analysis ▸ Event Debugger** shows a live trace of every bus in the session. Each publish shows who fired which event and, unless the filter shows a single bus, names its bus at the end of the row, followed by a row per listener that received it. Events published from inside a handler are indented one level deeper, so chain reactions read as a tree, even when a handler publishes onto another bus, and each root publish starts a new block separated by a divider.
 
 1. **Record** pauses or resumes capture. Buses report to the window only while it is open and recording, so a closed or paused window costs the publish path one flag check.
 2. **Clear on Play** discards the trace when entering Play Mode, like the Console. **Clear** discards it at any time.
 3. **Search** filters rows by event, publisher or listener name.
-4. **Bus filter** shows one bus at a time. Buses appear as "EventBus 1", "EventBus 2", … in creation order, or under a name set with `SetDebugName`. Buses sharing a name are filtered together, and a `/` in a name groups buses into submenus.
-5. The list is virtualized: only visible rows exist, the newest 10,000 entries are kept, and the view follows new events until you scroll up, resuming once you scroll back to the bottom.
+4. **Bus filter** shows one bus at a time. Buses appear as "EventBus 1", "EventBus 2", … in creation order, or under a name set with `SetDebugName`. Buses sharing a name are filtered together, and a `/` in a name groups buses into submenus. Disposed buses stay listed, marked as such, while the trace still holds their rows.
+5. The list is virtualized: only visible rows exist, the newest 10,000 entries are kept, and the view follows new events until you scroll up, resuming once you scroll back to the bottom. Resizing or re-docking the window never stops it from following.
 6. Colors follow the editor's Light or Dark theme.
 
 All of the instrumentation behind the window is compiled only in the editor. Player builds, including development builds, contain none of it, and `SetDebugName` calls are stripped from them by the compiler.
