@@ -334,7 +334,14 @@ namespace reromanlee.EventAggregator.Editor
         {
             EventBusDebugger.TraceEntry entry = visibleEntries[index];
             bool isChainStart = index > 0 && visibleEntries[index - 1].ChainId != entry.ChainId;
-            ((TraceRow)element).Bind(entry, isChainStart, timeColumnWidth);
+
+            // Publishes name their bus, so chains crossing buses read at a glance; redundant once filtered to one bus.
+            string busName = null;
+            if (entry.Kind == EventBusDebugger.EntryKind.Publish && selectedBusName == AllBusesChoice)
+            {
+                busNamesById.TryGetValue(entry.BusId, out busName);
+            }
+            ((TraceRow)element).Bind(entry, isChainStart, busName, timeColumnWidth);
         }
 
         /// <summary>Syncs bus names and the bus menu. Buses sharing a display name are listed, and filtered, as one.</summary>
@@ -360,6 +367,10 @@ namespace reromanlee.EventAggregator.Editor
             if (isRenamed && selectedBusName != AllBusesChoice)
             {
                 RebuildVisibleEntries(scrollToBottom: false);
+            }
+            else if (isRenamed)
+            {
+                listView.RefreshItems();
             }
         }
 

@@ -5,8 +5,8 @@ using UnityEngine.UIElements;
 namespace reromanlee.EventAggregator.Editor
 {
     /// <summary>
-    /// One reusable, virtualized row of the trace. A publish reads "publisher fired event", a delivery reads
-    /// "event went to listener"; both are timestamped and indented by chain depth.
+    /// One reusable, virtualized row of the trace. A publish reads "publisher fired event" and names its bus, a
+    /// delivery reads "event went to listener"; both are timestamped and indented by chain depth.
     /// </summary>
     internal sealed class TraceRow : VisualElement
     {
@@ -19,6 +19,7 @@ namespace reromanlee.EventAggregator.Editor
         private readonly VisualElement connectorIcon = new();
         private readonly VisualElement trailingIcon = new();
         private readonly Label trailingLabel = new();
+        private readonly Label busLabel = new();
 
         private float appliedTimeWidth;
 
@@ -32,12 +33,15 @@ namespace reromanlee.EventAggregator.Editor
             AddPart(connectorIcon, "trace-row__connector");
             AddPart(trailingIcon, "trace-row__icon");
             AddPart(trailingLabel, "trace-row__label");
+            AddPart(busLabel, "trace-row__bus");
+            trailingLabel.AddToClassList("trace-row__label--trailing");
         }
 
         /// <param name="entry">The trace entry to display.</param>
         /// <param name="isChainStart">Draws a divider above the row to separate it from the previous chain.</param>
+        /// <param name="busName">Shown at the row's end; null shows nothing.</param>
         /// <param name="timeWidth">Fixed width of the time column, so every row's tree lines up; 0 sizes it to its text.</param>
-        public void Bind(in EventBusDebugger.TraceEntry entry, bool isChainStart, float timeWidth)
+        public void Bind(in EventBusDebugger.TraceEntry entry, bool isChainStart, string busName, float timeWidth)
         {
             EnableInClassList("trace-row--chain-start", isChainStart);
             SetTimeWidth(timeWidth);
@@ -54,6 +58,7 @@ namespace reromanlee.EventAggregator.Editor
             connectorIcon.EnableInClassList("trace-row__connector--arrow", !isPublish);
             SetIcon(trailingIcon, isEvent: isPublish);
             trailingLabel.text = isPublish ? eventName : subjectName;
+            busLabel.text = busName ?? string.Empty;
         }
 
         private void AddPart(VisualElement part, string className)
