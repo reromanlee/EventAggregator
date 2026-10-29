@@ -20,6 +20,8 @@ namespace reromanlee.EventAggregator.Editor
         private readonly VisualElement trailingIcon = new();
         private readonly Label trailingLabel = new();
 
+        private float appliedTimeWidth;
+
         public TraceRow()
         {
             AddToClassList("trace-row");
@@ -34,9 +36,11 @@ namespace reromanlee.EventAggregator.Editor
 
         /// <param name="entry">The trace entry to display.</param>
         /// <param name="isChainStart">Draws a divider above the row to separate it from the previous chain.</param>
-        public void Bind(in EventBusDebugger.TraceEntry entry, bool isChainStart)
+        /// <param name="timeWidth">Fixed width of the time column, so every row's tree lines up; 0 sizes it to its text.</param>
+        public void Bind(in EventBusDebugger.TraceEntry entry, bool isChainStart, float timeWidth)
         {
             EnableInClassList("trace-row--chain-start", isChainStart);
+            SetTimeWidth(timeWidth);
             timeLabel.text = new DateTime(entry.TimestampTicks, DateTimeKind.Utc).ToLocalTime().ToString(TimeFormat, CultureInfo.InvariantCulture);
             SetIndent(entry.Depth);
 
@@ -57,6 +61,16 @@ namespace reromanlee.EventAggregator.Editor
             part.AddToClassList(className);
             part.pickingMode = PickingMode.Ignore;
             Add(part);
+        }
+
+        private void SetTimeWidth(float width)
+        {
+            if (width == appliedTimeWidth)
+            {
+                return;
+            }
+            appliedTimeWidth = width;
+            timeLabel.style.width = width > 0f ? new StyleLength(width) : new StyleLength(StyleKeyword.Null);
         }
 
         /// <summary>Reuses guide elements so scrolling through rows of varying depth allocates nothing in steady state.</summary>

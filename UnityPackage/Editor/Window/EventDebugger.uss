@@ -39,6 +39,11 @@
     opacity: 0.6;
 }
 
+.event-debugger__time-probe {
+    position: absolute;
+    visibility: hidden;
+}
+
 .trace-row {
     flex-direction: row;
     align-items: center;

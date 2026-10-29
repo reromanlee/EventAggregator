@@ -30,6 +30,14 @@ namespace reromanlee.EventAggregator.Editor
         private const long PollIntervalMilliseconds = 100;
         private const float RowHeight = 20f;
 
+        // One time per digit: proportional editor fonts give digits different widths, and the time column is
+        // sized for the widest so every row's tree starts at the same position.
+        private static readonly string[] TimeWidthSamples =
+        {
+            "00:00:00.000", "11:11:11.111", "22:22:22.222", "33:33:33.333", "44:44:44.444",
+            "55:55:55.555", "66:66:66.666", "77:77:77.777", "88:88:88.888", "99:99:99.999",
+        };
+
         // Serialized so the window keeps its setup across domain reloads and editor restarts.
         [SerializeField] private string selectedBusName = AllBusesChoice;
         [SerializeField] private string searchText = string.Empty;
@@ -50,6 +58,8 @@ namespace reromanlee.EventAggregator.Editor
         private ScrollView scrollView;
         private ToolbarMenu busMenu;
         private Label emptyLabel;
+        private Label timeProbe;
+        private float timeColumnWidth;
 
         // Follow intent changes only through user scrolling, never through layout, so resizing, re-docking or a
         // delayed layout pass cannot silently stop the view from following new events.
@@ -115,6 +125,13 @@ namespace reromanlee.EventAggregator.Editor
             emptyLabel = new Label { pickingMode = PickingMode.Ignore };
             emptyLabel.AddToClassList("event-debugger__empty");
             body.Add(emptyLabel);
+
+            // An invisible time label styled like the rows, so the column is measured with the real editor font.
+            timeProbe = new Label(TimeWidthSamples[0]) { pickingMode = PickingMode.Ignore };
+            timeProbe.AddToClassList("trace-row__time");
+            timeProbe.AddToClassList("event-debugger__time-probe");
+            timeProbe.RegisterCallback<GeometryChangedEvent>(OnTimeProbeGeometryChanged);
+            body.Add(timeProbe);
 
             ResetRows();
             root.schedule.Execute(Poll).Every(PollIntervalMilliseconds);
@@ -317,7 +334,7 @@ namespace reromanlee.EventAggregator.Editor
         {
             EventBusDebugger.TraceEntry entry = visibleEntries[index];
             bool isChainStart = index > 0 && visibleEntries[index - 1].ChainId != entry.ChainId;
-            ((TraceRow)element).Bind(entry, isChainStart);
+            ((TraceRow)element).Bind(entry, isChainStart, timeColumnWidth);
         }
 
         /// <summary>Syncs bus names and the bus menu. Buses sharing a display name are listed, and filtered, as one.</summary>
@@ -430,6 +447,22 @@ namespace reromanlee.EventAggregator.Editor
                 emptyLabel.text = retainedEntries.Count > 0 ? "No events match the current filter."
                     : isRecordingEnabled ? "No events recorded yet.\nEvents published while this window is open appear here."
                     : "Recording is paused.\nEnable Record in the toolbar to capture events.";
+            }
+        }
+
+        /// <summary>Sizes the time column for the widest possible time in the font the rows actually render with.</summary>
+        private void OnTimeProbeGeometryChanged(GeometryChangedEvent change)
+        {
+            float width = 0f;
+            foreach (string sample in TimeWidthSamples)
+            {
+                width = Mathf.Max(width, timeProbe.MeasureTextSize(sample, 0f, VisualElement.MeasureMode.Undefined, 0f, VisualElement.MeasureMode.Undefined).x);
+            }
+            width = Mathf.Ceil(width);
+            if (width > 0f && !Mathf.Approximately(width, timeColumnWidth))
+            {
+                timeColumnWidth = width;
+                listView.RefreshItems();
             }
         }
 
