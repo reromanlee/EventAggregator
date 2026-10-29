@@ -11,7 +11,7 @@ A detailed look at what EventAggregator guarantees and why. For setup and code, 
 1. Events are delivered **synchronously on the publishing thread**, in subscription order. `Publish` returns after the last listener ran.
 2. Event types are **matched exactly** by the type argument of `Publish<TEvent>`, which the compiler infers from the argument's static type. Publishing a derived event does not reach listeners of its base type; `Publish<BaseEvent>(derived)` does.
 3. Publishing an event nobody listens to is a valid, silent no-op.
-4. A listener **unsubscribed during a publish stops immediately**, including the rest of the publish in progress. A disabled or destroyed object never handles one more event after `Unsubscribe` returns.
+4. A listener **unsubscribed during a publish stops immediately**, including the rest of the publish in progress. A disabled or destroyed object never handles one more event from the thread that called `Unsubscribe`.
 5. A listener **subscribed during a publish** receives events from the next publish on, so chain reactions stay predictable.
 
 ### Subscriptions and identity
@@ -39,7 +39,7 @@ Handlers publishing further events is normal. An infinite cycle (A → B → A �
 
 ### Threading and async
 
-All members are thread-safe. Subscription changes serialize on one internal lock that is never held while handlers run, so handlers can publish, subscribe and unsubscribe re-entrantly without deadlocks. Handlers run on whichever thread called `Publish`; most Unity APIs must only be touched from the main thread. `async` code can publish normally, since the bus never blocks on or awaits handler code.
+All members are thread-safe. Subscription changes serialize on one internal lock that is never held while handlers run, so handlers can publish, subscribe and unsubscribe re-entrantly without deadlocks. Handlers run on whichever thread called `Publish`; most Unity APIs must only be touched from the main thread. As with C# events, a publish already running on another thread may still deliver one last event to a listener that has just unsubscribed, so handlers invoked from background threads should tolerate that. `async` code can publish normally, since the bus never blocks on or awaits handler code.
 
 ### Platform support
 
