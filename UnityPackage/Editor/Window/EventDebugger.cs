@@ -9,8 +9,8 @@ namespace reromanlee.EventAggregator.Editor
     /// <summary>
     /// Live view of every <see cref="EventBus"/> in the session: which events fired, who published them, which
     /// listeners received them, and how deep each chain reaction went. Rows are virtualized, so only the visible
-    /// ones exist however long the trace grows. The view follows new events unless scrolled up, and resumes
-    /// following once scrolled back to the bottom. Buses report to it only while the window is open and
+    /// ones exist however long the trace grows. The view follows new events until the user scrolls up, and
+    /// resumes following once scrolled back to the bottom. Buses report to it only while the window is open and
     /// recording, so a closed or paused window costs the publish path a single flag check.
     /// </summary>
     internal sealed class EventDebugger : EditorWindow
@@ -50,7 +50,11 @@ namespace reromanlee.EventAggregator.Editor
         private ScrollView scrollView;
         private ToolbarMenu busMenu;
         private Label emptyLabel;
-        private System.Action scrollToBottomAction;
+
+        // Follow intent changes only through user scrolling, never through layout, so resizing, re-docking or a
+        // delayed layout pass cannot silently stop the view from following new events.
+        private bool isFollowing = true;
+        private bool isScrollingProgrammatically;
 
         private bool isRecorderActive;
         private int lastVersion = -1;
@@ -104,12 +108,14 @@ namespace reromanlee.EventAggregator.Editor
             listView.AddToClassList("event-debugger__list");
             body.Add(listView);
             scrollView = listView.Q<ScrollView>();
+            scrollView.verticalScroller.valueChanged += OnScrolled;
+            scrollView.contentViewport.RegisterCallback<GeometryChangedEvent>(OnListGeometryChanged);
+            scrollView.contentContainer.RegisterCallback<GeometryChangedEvent>(OnListGeometryChanged);
 
             emptyLabel = new Label { pickingMode = PickingMode.Ignore };
             emptyLabel.AddToClassList("event-debugger__empty");
             body.Add(emptyLabel);
 
-            scrollToBottomAction = ScrollToBottomNow;
             ResetRows();
             root.schedule.Execute(Poll).Every(PollIntervalMilliseconds);
         }
@@ -232,12 +238,10 @@ namespace reromanlee.EventAggregator.Editor
                 return;
             }
 
-            bool shouldFollow = IsScrolledToBottom();
             retainedEntries.AddRange(pendingEntries);
             if (retainedEntries.Count > MaxRows)
             {
-                retainedEntries.RemoveRange(0, retainedEntries.Count - MaxRows + TrimChunk);
-                RebuildVisibleEntries(shouldFollow);
+                TrimOldestEntries();
                 return;
             }
 
@@ -249,11 +253,32 @@ namespace reromanlee.EventAggregator.Editor
                 }
             }
             listView.RefreshItems();
-            if (shouldFollow)
+            if (isFollowing)
             {
                 ScrollToBottom();
             }
             UpdateEmptyLabel();
+        }
+
+        /// <summary>Drops the oldest rows in one chunk. A user reading older rows keeps seeing the same ones.</summary>
+        private void TrimOldestEntries()
+        {
+            int removedCount = retainedEntries.Count - MaxRows + TrimChunk;
+            long firstKeptSequence = retainedEntries[removedCount].Sequence;
+            retainedEntries.RemoveRange(0, removedCount);
+
+            int removedVisibleCount = 0;
+            while (removedVisibleCount < visibleEntries.Count && visibleEntries[removedVisibleCount].Sequence < firstKeptSequence)
+            {
+                removedVisibleCount++;
+            }
+            float keptOffset = scrollView.verticalScroller.value - removedVisibleCount * RowHeight;
+
+            RebuildVisibleEntries(scrollToBottom: isFollowing);
+            if (!isFollowing)
+            {
+                SetScrollOffset(Mathf.Max(0f, keptOffset));
+            }
         }
 
         private void RebuildVisibleEntries(bool scrollToBottom)
@@ -269,6 +294,7 @@ namespace reromanlee.EventAggregator.Editor
             listView.RefreshItems();
             if (scrollToBottom)
             {
+                isFollowing = true;
                 ScrollToBottom();
             }
             UpdateEmptyLabel();
@@ -407,7 +433,25 @@ namespace reromanlee.EventAggregator.Editor
             }
         }
 
-        /// <summary>True while the view should follow new events: nothing to scroll yet, or within one row of the bottom.</summary>
+        /// <summary>Only user scrolling changes the follow intent: scrolling up stops following, reaching the bottom resumes it.</summary>
+        private void OnScrolled(float value)
+        {
+            if (!isScrollingProgrammatically)
+            {
+                isFollowing = IsScrolledToBottom();
+            }
+        }
+
+        /// <summary>Re-snaps after every resize of the list or its content, which may land after the rows were added.</summary>
+        private void OnListGeometryChanged(GeometryChangedEvent change)
+        {
+            if (isFollowing)
+            {
+                ScrollToBottom();
+            }
+        }
+
+        /// <summary>True when there is nothing to scroll yet, or the view is within one row of the bottom.</summary>
         private bool IsScrolledToBottom()
         {
             Scroller scroller = scrollView.verticalScroller;
@@ -417,16 +461,31 @@ namespace reromanlee.EventAggregator.Editor
 
         private void ScrollToBottom()
         {
-            // Snap now and once more after the next layout pass, when the scroll range reflects the new rows.
-            ScrollToBottomNow();
-            listView.schedule.Execute(scrollToBottomAction);
-        }
-
-        private void ScrollToBottomNow()
-        {
-            if (visibleEntries.Count > 0)
+            if (visibleEntries.Count == 0)
+            {
+                return;
+            }
+            isScrollingProgrammatically = true;
+            try
             {
                 listView.ScrollToItem(-1);
+            }
+            finally
+            {
+                isScrollingProgrammatically = false;
+            }
+        }
+
+        private void SetScrollOffset(float offset)
+        {
+            isScrollingProgrammatically = true;
+            try
+            {
+                scrollView.verticalScroller.value = offset;
+            }
+            finally
+            {
+                isScrollingProgrammatically = false;
             }
         }
 
