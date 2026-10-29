@@ -2,10 +2,10 @@ using UnityEngine;
 
 namespace reromanlee.EventAggregator.Samples.GettingStarted
 {
-    /// <summary>A listener that publishes from inside its handler: the Event Debugger shows it as a nested chain.</summary>
+    /// <summary>Announces every milestone the score crosses, from inside its handler: the chain grows one level deeper.</summary>
     public sealed class MilestoneTracker : MonoBehaviour, IEventListener<ScoreChanged>
     {
-        [SerializeField] private int milestoneStep = 5;
+        [SerializeField] private int milestoneStep = 100;
 
         private IEventBus eventBus;
 
@@ -14,7 +14,6 @@ namespace reromanlee.EventAggregator.Samples.GettingStarted
             eventBus = bus;
         }
 
-        // Subscribe and unsubscribe symmetrically, so a disabled or destroyed object never keeps listening.
         private void OnEnable()
         {
             eventBus.Subscribe(this);
@@ -27,9 +26,11 @@ namespace reromanlee.EventAggregator.Samples.GettingStarted
 
         public void Handle(ScoreChanged eventData)
         {
-            if (eventData.Score % milestoneStep == 0)
+            int previousScore = eventData.Score - eventData.Delta;
+            int milestones = eventData.Score / milestoneStep;
+            if (milestones > previousScore / milestoneStep)
             {
-                eventBus.Publish(new MilestoneReached(eventData.Score));
+                eventBus.Publish(new MilestoneReached(milestones * milestoneStep));
             }
         }
     }

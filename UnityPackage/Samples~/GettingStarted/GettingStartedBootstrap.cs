@@ -3,43 +3,35 @@ using UnityEngine;
 namespace reromanlee.EventAggregator.Samples.GettingStarted
 {
     /// <summary>
-    /// The composition root: owns the bus, builds the scene and hands every component the bus before it is
-    /// enabled. Add it to an empty GameObject and enter Play Mode. In a real project this role usually belongs to
-    /// your dependency injection container or game bootstrapper.
+    /// The composition root: owns the long-lived buses, builds the session and hands every component the buses it
+    /// needs before it is enabled. Add it to an empty GameObject and enter Play Mode. In a real project this role
+    /// usually belongs to your dependency injection container or game bootstrapper.
     /// </summary>
     public sealed class GettingStartedBootstrap : MonoBehaviour
     {
-        private EventBus eventBus;
+        private EventBus applicationBus;
+        private EventBus interfaceBus;
 
         private void Awake()
         {
-            eventBus = new EventBus();
-            eventBus.SetDebugName("Getting Started");
+            // One bus per concern keeps unrelated listeners apart. MatchDirector adds a short-lived bus per match.
+            applicationBus = new EventBus();
+            applicationBus.SetDebugName("Application");
+            interfaceBus = new EventBus();
+            interfaceBus.SetDebugName("User Interface");
 
-            Activate(Create<ScoreBoard>("Score Board"), component => component.Construct(eventBus));
-            Activate(Create<MilestoneTracker>("Milestone Tracker"), component => component.Construct(eventBus));
-            Activate(Create<ScoreKeeper>("Score Keeper"), component => component.Construct(eventBus));
+            GameObject session = ComponentHierarchy.CreateInactiveRoot("Session", transform);
+            ComponentHierarchy.AddChild<Hud>(session, "Hud").Construct(interfaceBus);
+            ComponentHierarchy.AddChild<SessionTracker>(session, "Session Tracker").Construct(applicationBus, interfaceBus);
+            ComponentHierarchy.AddChild<MatchDirector>(session, "Match Director").Construct(applicationBus, interfaceBus);
+            session.SetActive(true);
         }
 
         private void OnDestroy()
         {
             // Children may disable after this runs; their Unsubscribe calls are harmless no-ops once disposed.
-            eventBus.Dispose();
-        }
-
-        /// <summary>Creates the component on an inactive child, so OnEnable cannot run before the bus is injected.</summary>
-        private T Create<T>(string objectName) where T : Component
-        {
-            GameObject child = new(objectName);
-            child.SetActive(false);
-            child.transform.SetParent(transform, false);
-            return child.AddComponent<T>();
-        }
-
-        private static void Activate<T>(T component, System.Action<T> construct) where T : Component
-        {
-            construct(component);
-            component.gameObject.SetActive(true);
+            applicationBus.Dispose();
+            interfaceBus.Dispose();
         }
     }
 }

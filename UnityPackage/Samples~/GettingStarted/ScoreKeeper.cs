@@ -2,32 +2,35 @@ using UnityEngine;
 
 namespace reromanlee.EventAggregator.Samples.GettingStarted
 {
-    /// <summary>A publisher: raises the score on a fixed interval and announces every change.</summary>
-    public sealed class ScoreKeeper : MonoBehaviour
+    /// <summary>A listener that publishes from inside its handler: each defeat becomes a score change, nested under it in the Event Debugger.</summary>
+    public sealed class ScoreKeeper : MonoBehaviour, IEventListener<EnemyDefeated>
     {
-        [SerializeField] private float tickInterval = 1f;
-        [SerializeField] private int pointsPerTick = 1;
-
         private IEventBus eventBus;
         private int score;
-        private float nextTickTime;
 
-        /// <summary>Receives the bus from the composition root before the component is enabled.</summary>
+        public int Score => score;
+
+        /// <summary>Receives the bus from its composition root before the component is enabled.</summary>
         public void Construct(IEventBus bus)
         {
             eventBus = bus;
         }
 
-        private void Update()
+        // Subscribe and unsubscribe symmetrically, so a disabled or destroyed object never keeps listening.
+        private void OnEnable()
         {
-            if (Time.time < nextTickTime)
-            {
-                return;
-            }
-            nextTickTime = Time.time + tickInterval;
+            eventBus.Subscribe(this);
+        }
 
-            score += pointsPerTick;
-            eventBus.Publish(new ScoreChanged(score, pointsPerTick));
+        private void OnDisable()
+        {
+            eventBus.Unsubscribe(this);
+        }
+
+        public void Handle(EnemyDefeated eventData)
+        {
+            score += eventData.Points;
+            eventBus.Publish(new ScoreChanged(score, eventData.Points));
         }
     }
 }

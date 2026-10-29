@@ -18,7 +18,7 @@
   "samples": [
     {
       "displayName": "Getting Started",
-      "description": "A composition root that owns the bus, plus a publisher and listeners showing the OnEnable/OnDisable pattern, a listener of two event types, and a chained event in the Event Debugger.",
+      "description": "Back-to-back matches on application, user interface and per-match buses: injecting buses before OnEnable, chained events, presenters bridging buses, and tearing a scoped bus down, all visible in the Event Debugger.",
       "path": "Samples~/GettingStarted"
     }
   ],
