@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using NUnit.Framework;
 using UnityEditor;
@@ -52,6 +53,25 @@ namespace reromanlee.EventAggregator.Editor.Tests
                 bus.Dispose();
                 window.Close();
             }
+        }
+
+        [Test]
+        public void TraceRow_ShowsTheBusNameOnlyWhenGiven()
+        {
+            EventBusDebugger.TraceEntry entry = new(0, 0, DateTime.UtcNow.Ticks, typeof(WindowProbe), typeof(ProbeListener), 0, 0, EventBusDebugger.EntryKind.Publish);
+            TraceRow row = new();
+            VisualElement bus = row.Q(className: "trace-row__bus");
+            Label busLabel = bus.Q<Label>(className: "trace-row__bus-name");
+
+            row.Bind(entry, isChainStart: false, busName: "Row Bus", timeWidth: 0f);
+            Assert.That(busLabel.text, Is.EqualTo("Row Bus"));
+            Assert.That(bus.style.display.value, Is.EqualTo(DisplayStyle.Flex));
+
+            row.Bind(entry, isChainStart: false, busName: null, timeWidth: 0f);
+            Assert.That(bus.style.display.value, Is.EqualTo(DisplayStyle.None));
+
+            row.Bind(entry, isChainStart: false, busName: "Row Bus", timeWidth: 0f);
+            Assert.That(bus.style.display.value, Is.EqualTo(DisplayStyle.Flex));
         }
     }
 }
