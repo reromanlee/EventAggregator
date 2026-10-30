@@ -1,6 +1,8 @@
 using System;
-using System.Collections.Concurrent;
-using UnityEngine;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using Debug = UnityEngine.Debug;
 
 namespace reromanlee.EventAggregator
 {
@@ -8,77 +10,79 @@ namespace reromanlee.EventAggregator
     /// Thread-safe <see cref="IEventBus"/> implementation optimized for a publish-heavy workload.
     /// </summary>
     /// <remarks>
-    /// <para><b>Performance.</b> Each event type keeps an immutable snapshot of its listeners that is
-    /// rebuilt only when a listener is added or removed, so <see cref="Publish{TEvent}"/> takes no locks
-    /// and allocates no memory — safe to call every frame without GC pressure.</para>
+    /// <para><b>Performance.</b> <see cref="Publish{TEvent}"/> never locks and never allocates: it finds the
+    /// event type's listeners with one array read and walks them directly. Subscribing and unsubscribing are
+    /// amortized O(1), so even thousands of listeners joining in one frame cost linear time and memory.</para>
     /// <para><b>Delivery semantics.</b> Events are delivered synchronously on the publishing thread, in
-    /// subscription order. A publish dispatches to the listeners subscribed at the moment it starts;
-    /// listeners added or removed mid-publish (by a handler or another thread) take effect for
-    /// subsequent publishes only. A listener that throws is logged and skipped, and the remaining
-    /// listeners still receive the event.</para>
-    /// <para><b>Lifetime.</b> The bus holds strong references to listeners. A listener that is never
-    /// unsubscribed is kept alive and keeps receiving events, so teardown code must always unsubscribe.
-    /// Unsubscribing after the bus was disposed is a harmless no-op.</para>
-    /// <para><b>Recursion.</b> In the editor and development builds, runaway recursive publishing
-    /// (a handler for event A publishing B whose handler publishes A again, forever) is detected and
-    /// reported as an error instead of crashing the player with an undebuggable stack overflow.
-    /// The check is compiled out of release builds entirely.</para>
-    /// <para><b>Debugging.</b> In the editor, every bus reports its publishes and deliveries to the
-    /// Event Debugger window (Tools ▸ Event Debugger), where instances appear as "EventBus N" or the
-    /// name given via <see cref="SetDebugName"/>. All of this instrumentation — including calls to
-    /// <see cref="SetDebugName"/> — is compiled out of player builds and costs nothing there.</para>
+    /// subscription order. Listeners added during a publish receive events from the next publish on.
+    /// Listeners removed during a publish stop receiving immediately, including the rest of the publish in
+    /// progress. A listener that throws is logged and skipped; the remaining listeners still receive the event.</para>
+    /// <para><b>Lifetime.</b> The bus holds strong references to listeners, so teardown code should always
+    /// unsubscribe. A listener that is a destroyed Unity object is skipped and unsubscribed automatically, with
+    /// a warning in the editor and development builds. After <see cref="Dispose"/>, publishing and
+    /// unsubscribing are harmless no-ops, so teardown order never matters.</para>
+    /// <para><b>Recursion.</b> In the editor and development builds, runaway recursive publishing (a handler
+    /// for event A publishing B whose handler publishes A again, forever) is reported as an error and the rest
+    /// of that event chain is cancelled, instead of crashing with an undebuggable stack overflow or freezing on
+    /// fan-out. The check is compiled out of release builds entirely.</para>
+    /// <para><b>Debugging.</b> While the Event Debugger window (Window ▸ Analysis ▸ Event Debugger) is open, every
+    /// bus reports its publishes and deliveries to it, where instances appear as "EventBus N" or the name given
+    /// via <see cref="SetDebugName"/>. With the window closed this costs one flag check per publish, and player
+    /// builds contain none of this instrumentation.</para>
     /// </remarks>
     public sealed class EventBus : IEventBus, IDisposable
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         /// <summary>
-        /// Nested publishes deeper than this are treated as an infinite publish loop. The counter is
-        /// per thread and shared by all bus instances; the limit is generous enough that legitimate
-        /// event chains never trip it.
+        /// Nested publishes deeper than this are treated as an infinite publish loop. The counter is per thread
+        /// and shared by all bus instances; the limit is generous enough that legitimate chains never reach it.
         /// </summary>
         private const int MaxPublishDepth = 64;
 
         [ThreadStatic] private static int publishDepth;
+
+        // Set once a runaway chain is reported; every remaining publish of that chain on this thread is then
+        // skipped so the stack unwinds in linear time instead of exploring each fan-out branch to the limit.
+        [ThreadStatic] private static bool isRunawayChainCancelled;
 #endif
 
-        // Listener groups keyed by event type. A ConcurrentDictionary lets the publish path read
-        // lock-free while Subscribe/Unsubscribe/Dispose mutate under mutationLock. Entries are only
-        // ever added or cleared, never replaced, so a raced read always sees a valid group.
-        // concurrencyLevel is 1 because writes are already serialized by mutationLock; the default
-        // would allocate one internal lock stripe per CPU core per bus for nothing.
-        private readonly ConcurrentDictionary<Type, IEventListeners> listenerTypes = new(concurrencyLevel: 1, capacity: 31);
+        // Listener groups indexed by EventTypeIndex<TEvent>.Value. Publish reads lock-free; Subscribe fills an
+        // empty slot or swaps in a grown copy under mutationLock. Reading this field is the publish path's only
+        // memory fence (IL2CPP turns every volatile read into a full fence); every later read is ordered by it.
+        private volatile IEventListeners[] groups = Array.Empty<IEventListeners>();
 
-        // Serializes all mutations (Subscribe/Unsubscribe/Dispose). Never held while listeners run,
-        // so handlers are free to publish, subscribe, or unsubscribe re-entrantly without deadlocking.
+        // Serializes all mutations. Never held while listeners run, so handlers may publish, subscribe, or
+        // unsubscribe re-entrantly without deadlocking.
         private readonly object mutationLock = new();
 
-        private volatile bool isDisposed;
+        // Written under mutationLock, read after the acquire of groups; Dispose also empties groups, so a stale
+        // read can only delay the disposed warning, never deliver to a released listener.
+        private bool isDisposed;
+        private bool hasWarnedPublishAfterDispose;
 
 #if UNITY_EDITOR
-        // Identifies this instance in the editor-only Event Debugger window (Tools ▸ Event Debugger).
+        // Identifies this instance in the Event Debugger window.
         private readonly int debugId;
 #endif
 
         /// <summary>
-        /// Creates an empty bus. In the editor, the instance registers itself with the
-        /// Event Debugger window (Tools ▸ Event Debugger); player builds skip registration entirely.
+        /// Creates an empty bus. In the editor, the instance registers itself with the Event Debugger window;
+        /// player builds skip registration entirely.
         /// </summary>
         public EventBus()
         {
 #if UNITY_EDITOR
-            debugId = EventBusDebugger.Register();
+            debugId = EventBusDebugger.Register(this);
 #endif
         }
 
         /// <summary>
-        /// Names this bus in the editor's Event Debugger window in place of the default
-        /// "EventBus N". Editor-only: calls to this method are stripped from player builds by the
-        /// compiler, so it can be called unconditionally from runtime code at zero build cost.
+        /// Names this bus in the Event Debugger window in place of the default "EventBus N". Editor-only: calls
+        /// to this method are stripped from player builds by the compiler, arguments included.
         /// </summary>
-        /// <param name="name">The display name shown in the debugger window. Avoid ending it with
-        /// Unity menu shortcut notation ('#', '%', '&amp;' or '_' followed by a character), which
-        /// editor dropdowns would render as a keyboard shortcut instead of text.</param>
-        [System.Diagnostics.Conditional("UNITY_EDITOR")]
+        /// <param name="name">The display name; null or whitespace restores the default. Buses sharing a name are
+        /// filtered together, and a '/' groups names into submenus of the bus filter.</param>
+        [Conditional("UNITY_EDITOR")]
         public void SetDebugName(string name)
         {
 #if UNITY_EDITOR
@@ -87,120 +91,130 @@ namespace reromanlee.EventAggregator
         }
 
         /// <inheritdoc/>
-        /// <exception cref="ObjectDisposedException">The bus has been disposed.</exception>
+        /// <remarks>
+        /// Publishing on a disposed bus does nothing; the editor and development builds log one warning per bus,
+        /// since it usually means an object outlived the bus's owner.
+        /// </remarks>
         public void Publish<TEvent>(TEvent eventData)
         {
-            if (isDisposed)
+            // Disposal empties every group, so the disposed check only runs on the no-listeners path.
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            if (group == null && isDisposed)
             {
-                throw new ObjectDisposedException(nameof(EventBus));
-            }
-
-#if UNITY_EDITOR
-            // Editor-only trace for the Event Debugger window. Recorded before the subscriber
-            // checks so that events nobody listens to still show up as "fired, went nowhere".
-            EventBusDebugger.OnPublish(debugId, typeof(TEvent), publishDepth);
-#endif
-
-            // No subscribers for this event type (yet) is a normal situation, not an error:
-            // the listening system may simply not be active. Deliberately a silent no-op.
-            if (!listenerTypes.TryGetValue(typeof(TEvent), out IEventListeners group))
-            {
-                return;
-            }
-
-            IEventListener<TEvent>[] snapshot = ((EventListeners<TEvent>)group).Snapshot;
-            if (snapshot.Length == 0)
-            {
+                WarnPublishAfterDispose<TEvent>();
                 return;
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            if (++publishDepth > MaxPublishDepth)
+            int depth = publishDepth;
+            if (depth > 0 && isRunawayChainCancelled)
             {
-                publishDepth--;
-                throw new InvalidOperationException(
-                    $"Publish depth exceeded {MaxPublishDepth} while publishing '{typeof(TEvent).Name}'. " +
-                    "Listeners are most likely publishing events that recursively trigger each other.");
+                return;
             }
+#endif
+
+#if UNITY_EDITOR
+            bool isRecording = EventBusDebugger.IsRecording;
+            if (isRecording)
+            {
+                EventBusDebugger.RecordPublish(debugId, typeof(TEvent), depth);
+            }
+#endif
+
+            // No subscribers for this event type (yet) is a normal situation, not an error: the listening
+            // system may simply not be active. Deliberately a silent no-op.
+            if (group == null)
+            {
+                return;
+            }
+
+            ListenerSnapshot<TEvent> snapshot = group.Snapshot;
+            int length = snapshot.Count;
+            if (length == 0)
+            {
+                return;
+            }
+            Subscription<TEvent>[] subscriptions = snapshot.Subscriptions;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            if (depth >= MaxPublishDepth)
+            {
+                CancelRunawayChain<TEvent>();
+                return;
+            }
+
+            publishDepth = depth + 1;
             try
             {
 #endif
-                for (int i = 0; i < snapshot.Length; i++)
+                for (int i = 0; i < length; i++)
                 {
+                    Subscription<TEvent> subscription = subscriptions[i];
+                    if (subscription == null || !subscription.IsActive)
+                    {
+                        continue;
+                    }
+
+                    if (subscription.IsDestroyed)
+                    {
+                        RemoveDestroyedListener(group, subscription);
+                        continue;
+                    }
+
 #if UNITY_EDITOR
-                    // Record the delivery one level deeper than its publish, and mark this listener
-                    // as the executing handler so any events it publishes are attributed to it.
-                    string listenerName = snapshot[i].GetType().Name;
-                    EventBusDebugger.OnDelivery(debugId, typeof(TEvent), listenerName, publishDepth);
-                    string previousHandler = EventBusDebugger.BeginHandler(listenerName);
-                    try
+                    if (isRecording)
                     {
+                        DeliverRecorded(subscription, eventData, depth + 1);
+                        continue;
+                    }
 #endif
+
                     try
                     {
-                        snapshot[i].Handle(eventData);
+                        subscription.Listener.Handle(eventData);
                     }
                     catch (Exception exception)
                     {
-                        Debug.LogError(
-                            $"Listener '{snapshot[i].GetType().Name}' threw while handling '{typeof(TEvent).Name}':\n{exception}");
+                        ReportListenerException(subscription, exception);
                     }
-#if UNITY_EDITOR
-                    }
-                    finally
-                    {
-                        EventBusDebugger.EndHandler(previousHandler);
-                    }
-#endif
                 }
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
             finally
             {
-                publishDepth--;
+                publishDepth = depth;
+                if (depth == 0)
+                {
+                    isRunawayChainCancelled = false;
+                }
             }
 #endif
         }
 
         /// <inheritdoc/>
         /// <exception cref="ArgumentNullException"><paramref name="listener"/> is null.</exception>
+        /// <exception cref="ArgumentException"><paramref name="listener"/> is a value type.</exception>
         /// <exception cref="ObjectDisposedException">The bus has been disposed.</exception>
         public void Subscribe<TEvent>(IEventListener<TEvent> listener)
         {
-            if (listener == null)
-            {
-                throw new ArgumentNullException(nameof(listener));
-            }
-            if (isDisposed)
-            {
-                throw new ObjectDisposedException(nameof(EventBus));
-            }
+            ValidateListener(listener);
 
+            bool isDuplicate;
             lock (mutationLock)
             {
-                // Re-check under the lock so a listener cannot slip in after Dispose cleared everything.
                 if (isDisposed)
                 {
                     throw new ObjectDisposedException(nameof(EventBus));
                 }
+                isDuplicate = !GetOrCreateGroup<TEvent>().Add(listener);
+            }
 
-                EventListeners<TEvent> group;
-                if (listenerTypes.TryGetValue(typeof(TEvent), out IEventListeners existing))
-                {
-                    group = (EventListeners<TEvent>)existing;
-                }
-                else
-                {
-                    group = new EventListeners<TEvent>();
-                    listenerTypes[typeof(TEvent)] = group;
-                }
-
-                if (!group.Add(listener))
-                {
-                    // A duplicate subscription would make the listener handle every event twice.
-                    Debug.LogWarning(
-                        $"Listener '{listener.GetType().Name}' is already subscribed to '{typeof(TEvent).Name}'; duplicate subscription ignored.");
-                }
+            if (isDuplicate)
+            {
+                // A duplicate subscription would make the listener handle every event twice.
+                Debug.LogWarning(
+                    $"Listener '{listener.GetType().Name}' is already subscribed to '{typeof(TEvent).Name}'; duplicate subscription ignored.",
+                    listener as UnityEngine.Object);
             }
         }
 
@@ -213,8 +227,8 @@ namespace reromanlee.EventAggregator
                 throw new ArgumentNullException(nameof(listener));
             }
 
-            // Unsubscribing after disposal is a no-op rather than an error: teardown code
-            // (OnDestroy/OnDisable) routinely runs after the bus's owner has disposed it.
+            // Unsubscribing after disposal is a no-op rather than an error: teardown code (OnDisable/OnDestroy)
+            // routinely runs after the bus's owner has disposed it.
             if (isDisposed)
             {
                 return;
@@ -222,18 +236,26 @@ namespace reromanlee.EventAggregator
 
             lock (mutationLock)
             {
-                if (!isDisposed && listenerTypes.TryGetValue(typeof(TEvent), out IEventListeners group))
+                if (!isDisposed)
                 {
-                    ((EventListeners<TEvent>)group).Remove(listener);
+                    FindGroup<TEvent>()?.Remove(listener);
                 }
             }
         }
 
+        /// <inheritdoc/>
+        public bool HasListeners<TEvent>()
+        {
+            // Disposal empties every group, so a disposed bus reports no listeners without a separate check.
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            return group != null && group.ActiveCount > 0;
+        }
+
         /// <summary>
-        /// Releases all listeners. After disposal, <see cref="Publish{TEvent}"/> and
-        /// <see cref="Subscribe{TEvent}"/> throw <see cref="ObjectDisposedException"/>, while
-        /// <see cref="Unsubscribe{TEvent}"/> becomes a no-op so teardown code stays safe.
-        /// Disposing more than once is allowed.
+        /// Releases all listeners and stops any delivery still in progress. Afterwards <see cref="Publish{TEvent}"/>,
+        /// <see cref="Unsubscribe{TEvent}"/> and <see cref="HasListeners{TEvent}"/> are harmless no-ops, while
+        /// <see cref="Subscribe{TEvent}"/> throws <see cref="ObjectDisposedException"/> because that listener would
+        /// never receive anything. Disposing more than once is allowed.
         /// </summary>
         public void Dispose()
         {
@@ -250,18 +272,146 @@ namespace reromanlee.EventAggregator
                 }
                 isDisposed = true;
 
-#if UNITY_EDITOR
-                EventBusDebugger.Unregister(debugId);
-#endif
-
-                // Empty every snapshot so a publish that already passed the disposed check
-                // delivers to no one instead of to stale listeners.
-                foreach (IEventListeners group in listenerTypes.Values)
+                IEventListeners[] current = groups;
+                groups = Array.Empty<IEventListeners>();
+                foreach (IEventListeners group in current)
                 {
-                    group.Clear();
+                    group?.Clear();
                 }
-                listenerTypes.Clear();
+            }
+
+#if UNITY_EDITOR
+            EventBusDebugger.Unregister(debugId);
+#endif
+        }
+
+        private static void ValidateListener<TEvent>(IEventListener<TEvent> listener)
+        {
+            if (listener == null)
+            {
+                throw new ArgumentNullException(nameof(listener));
+            }
+
+            // A struct listener is boxed anew on every call, so Unsubscribe could never find the subscribed box.
+            if (listener.GetType().IsValueType)
+            {
+                throw new ArgumentException(
+                    $"Listener '{listener.GetType().Name}' is a value type; listeners must be classes so they can be unsubscribed.",
+                    nameof(listener));
             }
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private EventListeners<TEvent> FindGroup<TEvent>()
+        {
+            int typeIndex = EventTypeIndex<TEvent>.Value;
+            IEventListeners[] current = groups;
+            return (uint)typeIndex < (uint)current.Length ? (EventListeners<TEvent>)current[typeIndex] : null;
+        }
+
+        /// <summary>Must be called under <see cref="mutationLock"/>.</summary>
+        private EventListeners<TEvent> GetOrCreateGroup<TEvent>()
+        {
+            EventListeners<TEvent> group = FindGroup<TEvent>();
+            if (group != null)
+            {
+                return group;
+            }
+
+            group = new EventListeners<TEvent>();
+            int typeIndex = EventTypeIndex<TEvent>.Value;
+            IEventListeners[] current = groups;
+            if (typeIndex < current.Length)
+            {
+                // Release semantics: a lock-free reader that sees the group also sees it fully constructed.
+                Volatile.Write(ref current[typeIndex], group);
+            }
+            else
+            {
+                IEventListeners[] grown = new IEventListeners[Math.Max(typeIndex + 1, current.Length + current.Length / 2)];
+                Array.Copy(current, grown, current.Length);
+                grown[typeIndex] = group;
+                groups = grown;
+            }
+            return group;
+        }
+
+        private void RemoveDestroyedListener<TEvent>(EventListeners<TEvent> group, Subscription<TEvent> subscription)
+        {
+            bool isRemoved;
+            lock (mutationLock)
+            {
+                isRemoved = !isDisposed && group.Remove(subscription);
+            }
+
+            if (isRemoved)
+            {
+                WarnDestroyedListener<TEvent>(subscription);
+            }
+        }
+
+        private static void ReportListenerException<TEvent>(Subscription<TEvent> subscription, Exception exception)
+        {
+            // LogException keeps the original stack trace clickable in the Console, and the listener as context
+            // highlights its GameObject when the entry is selected.
+            Debug.LogException(exception, subscription.UnityObject);
+        }
+
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD")]
+        private void WarnPublishAfterDispose<TEvent>()
+        {
+            if (hasWarnedPublishAfterDispose)
+            {
+                return;
+            }
+            hasWarnedPublishAfterDispose = true;
+
+            Debug.LogWarning(
+                $"'{typeof(TEvent).Name}' was published on a disposed EventBus and ignored. This usually means an object " +
+                "outlived the bus's owner, e.g. publishing from OnDisable or OnDestroy during teardown. " +
+                "Further publishes on this bus are ignored without a warning.");
+        }
+
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD")]
+        private static void WarnDestroyedListener<TEvent>(Subscription<TEvent> subscription)
+        {
+            Debug.LogWarning(
+                $"Listener '{subscription.Listener.GetType().Name}' was destroyed while still subscribed to '{typeof(TEvent).Name}' " +
+                "and has been unsubscribed automatically. Unsubscribe in OnDisable or OnDestroy to release it deterministically.");
+        }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        private static void CancelRunawayChain<TEvent>()
+        {
+            isRunawayChainCancelled = true;
+            Debug.LogError(
+                $"Publish depth exceeded {MaxPublishDepth} while publishing '{typeof(TEvent).Name}': listeners are most likely " +
+                "publishing events that recursively trigger each other. The rest of this event chain was cancelled. " +
+                "This check exists only in the editor and development builds; a release build would overflow the stack.");
+        }
+#endif
+
+#if UNITY_EDITOR
+        private void DeliverRecorded<TEvent>(Subscription<TEvent> subscription, TEvent eventData, int depth)
+        {
+            Type listenerType = subscription.Listener.GetType();
+            EventBusDebugger.RecordDelivery(debugId, typeof(TEvent), listenerType, depth);
+
+            // Marks this listener as the executing handler so events it publishes are attributed to it.
+            Type previousHandler = EventBusDebugger.BeginHandler(listenerType);
+            try
+            {
+                subscription.Listener.Handle(eventData);
+            }
+            catch (Exception exception)
+            {
+                ReportListenerException(subscription, exception);
+            }
+            finally
+            {
+                EventBusDebugger.EndHandler(previousHandler);
+            }
+        }
+#endif
     }
 }

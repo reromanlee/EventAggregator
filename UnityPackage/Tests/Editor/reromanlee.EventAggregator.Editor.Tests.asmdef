@@ -1,0 +1,25 @@
+{
+    "name": "reromanlee.EventAggregator.Editor.Tests",
+    "rootNamespace": "reromanlee.EventAggregator.Editor.Tests",
+    "references": [
+        "reromanlee.EventAggregator",
+        "reromanlee.EventAggregator.Editor",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
