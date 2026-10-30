@@ -6,7 +6,7 @@ Producers publish plain structs or classes; listeners implement `IEventListener<
 
 It is built for long-running production use: listeners removed mid-publish stop at once, destroyed MonoBehaviours are pruned automatically, a throwing listener never blocks the rest, and teardown order can never crash shutdown code. The Event Debugger window shows every publish and delivery live, as a tree of chain reactions.
 
-![Event Debugger showcase](.github/readme-event-debugger.gif)
+![Event Debugger showcase](.github/EventAggregatorDemo.gif)
 
 ### Features
 
