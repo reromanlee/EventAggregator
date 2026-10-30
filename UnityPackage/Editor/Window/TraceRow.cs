@@ -19,22 +19,28 @@ namespace reromanlee.EventAggregator.Editor
         private readonly VisualElement connectorIcon = new();
         private readonly VisualElement trailingIcon = new();
         private readonly Label trailingLabel = new();
+        private readonly VisualElement busContainer = new();
         private readonly Label busLabel = new();
 
         private float appliedTimeWidth;
+        private bool isBusShown = true;
 
         public TraceRow()
         {
             AddToClassList("trace-row");
-            AddPart(timeLabel, "trace-row__time");
-            AddPart(indent, "trace-row__indent");
-            AddPart(leadingIcon, "trace-row__icon");
-            AddPart(leadingLabel, "trace-row__label");
-            AddPart(connectorIcon, "trace-row__connector");
-            AddPart(trailingIcon, "trace-row__icon");
-            AddPart(trailingLabel, "trace-row__label");
-            AddPart(busLabel, "trace-row__bus");
+            AddPart(this, timeLabel, "trace-row__time");
+            AddPart(this, indent, "trace-row__indent");
+            AddPart(this, leadingIcon, "trace-row__icon");
+            AddPart(this, leadingLabel, "trace-row__label");
+            AddPart(this, connectorIcon, "trace-row__connector");
+            AddPart(this, trailingIcon, "trace-row__icon");
+            AddPart(this, trailingLabel, "trace-row__label");
             trailingLabel.AddToClassList("trace-row__label--trailing");
+
+            // The width cap sits on a plain container: Unity's text measurement applies a percentage max-width set
+            // on a label a second time, cutting bus names far shorter.
+            AddPart(this, busContainer, "trace-row__bus");
+            AddPart(busContainer, busLabel, "trace-row__bus-name");
         }
 
         /// <param name="entry">The trace entry to display.</param>
@@ -58,14 +64,29 @@ namespace reromanlee.EventAggregator.Editor
             connectorIcon.EnableInClassList("trace-row__connector--arrow", !isPublish);
             SetIcon(trailingIcon, isEvent: isPublish);
             trailingLabel.text = isPublish ? eventName : subjectName;
-            busLabel.text = busName ?? string.Empty;
+            SetBusName(busName);
         }
 
-        private void AddPart(VisualElement part, string className)
+        private static void AddPart(VisualElement parent, VisualElement part, string className)
         {
             part.AddToClassList(className);
             part.pickingMode = PickingMode.Ignore;
-            Add(part);
+            parent.Add(part);
+        }
+
+        private void SetBusName(string busName)
+        {
+            bool isShown = busName != null;
+            if (isShown != isBusShown)
+            {
+                busContainer.style.display = isShown ? DisplayStyle.Flex : DisplayStyle.None;
+                isBusShown = isShown;
+            }
+
+            if (isShown)
+            {
+                busLabel.text = busName;
+            }
         }
 
         private void SetTimeWidth(float width)
